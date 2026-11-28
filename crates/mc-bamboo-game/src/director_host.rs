@@ -2143,7 +2143,28 @@ impl DirectorHost {
                     // 停放盒子的生成阶段跟着存档元数据走；没有读盘元数据时是 Full。
                     // A parked box carries its persisted stage in archive metadata.
                     let status = column.chunk_column().chunk().archive().status;
-                    self.restore_decoded_stage(pos, status, &column, None);
+                    // 非 full 的停放盒子带着上层内容（方块实体 / 计划刻 / 实体）。
+                    // 把盒子重新打包成读盘字节，让 restore_decoded_stage 把上层
+                    // 内容填回 disk_upper_bytes，完工组装的 adopt_upper_content
+                    // 才不会在重建方块层时丢掉它。Full 的盒子不需要续跑，跳过。
+                    // A non-full parked box carries upper-layer content (block
+                    // entities / scheduled ticks / entities). Re-pack it as disk
+                    // bytes so restore_decoded_stage refills disk_upper_bytes and
+                    // the final assembly's adopt_upper_content does not lose it
+                    // when rebuilding the block layer. A Full box is finished and
+                    // needs no resume, so skip the re-pack.
+                    let restored = if status == ChunkStatus::Full {
+                        None
+                    } else {
+                        match encode_column(pos, &column) {
+                            Ok(packed) => Some(packed.pack()),
+                            Err(error) => {
+                                tracing::warn!(%error, "could not re-pack a parked non-full column");
+                                None
+                            }
+                        }
+                    };
+                    self.restore_decoded_stage(pos, status, &column, restored.as_deref());
                     TaskResult::Decoded { column, status }
                 } else if self.io.is_some() {
                     // 官方 `ChunkMap.scheduleChunkLoad` 没有「盘上有就异步、盘上没有就
@@ -3923,5 +3944,82 @@ mod tests {
         assert_eq!(seen.len(), 4, "四个读都提交了");
         assert_eq!(seen[0], ORIGIN, "最近的出生点区块必须先提交给 IO 线程");
         assert_eq!(seen[1], ChunkPos::new(3, 0), "其次按距离");
+    }
+
+    /// 带熔炉方块实体的非 `full` 读盘盒子。`set_block` 放熔炉会在方块层登记方块实体，
+    /// 编解码往返后它会被复原成活方块实体。
+    ///
+    /// A non-`full` disk column carrying a furnace block entity. Placing the furnace
+    /// with `set_block` registers a block entity that survives a codec round trip.
+    fn parked_column_with_block_entity(status: ChunkStatus) -> Box<RegionColumn> {
+        use mc_bamboo_data::blocks;
+        let mut column = RegionColumn::from_template();
+        column
+            .column_mut()
+            .chunk_mut()
+            .set_block(6, -60, 9, blocks::FURNACE);
+        let mut archive = column.chunk_column().chunk().archive().clone();
+        archive.status = status;
+        column.set_archive(archive);
+        Box::new(column)
+    }
+
+    /// 取消的 `Generate` 把半成品盒子带回、被停放；票回来后 `Task::Read` 命中停放表
+    /// 续跑到组装，方块实体必须还在（修复前 `disk_upper_bytes` 没被填回，会丢）。
+    ///
+    /// A cancelled `Generate` hands its half-built box back and it is parked; when the
+    /// ticket returns, `Task::Read` resumes it from the parking table through assembly
+    /// and the block entity must survive (before the fix `disk_upper_bytes` was not
+    /// refilled and it was dropped).
+    #[test]
+    fn a_cancelled_generate_parked_box_keeps_block_entities_when_read_resumes() {
+        let pos = ORIGIN;
+        let mut host = DirectorHost::new(DirectorConfig::default());
+        let mut island = bare_island();
+        let reply = ChunkReply {
+            pos,
+            generation: 0,
+            outcome: ChunkOutcome::Cancelled {
+                column: Some(parked_column_with_block_entity(ChunkStatus::Light)),
+            },
+        };
+        let event = host.compute_event(99, reply);
+        host.pump(&mut IslandAccess::Lent(&mut island), vec![event]);
+        assert!(host.parking.contains(pos), "the orphan box is parked");
+
+        let read = host
+            .run_task(0, 0, Task::Read { pos })
+            .expect("a parked box answers synchronously");
+        let Event::TaskDone {
+            result: TaskResult::Decoded { column, status },
+            ..
+        } = read
+        else {
+            panic!("expected a Decoded result from the parked box");
+        };
+        assert_eq!(status, ChunkStatus::Light);
+        assert!(
+            host.disk_upper_bytes.contains_key(&pos),
+            "a non-full parked box must refill disk_upper_bytes"
+        );
+
+        // 加一条空增量，让 `disk_after_features` 走「合并 + 重建方块层」的分支。
+        // One empty delta forces the `disk_after_features` "merge + rebuild" branch.
+        host.feature_deltas.insert(pos, Vec::new());
+        let assembled = host
+            .run_task(1, 0, Task::Assemble { pos, column })
+            .expect("inline assembly replies at once");
+        let Event::TaskDone {
+            result: TaskResult::Assembled { column: finished },
+            ..
+        } = assembled
+        else {
+            panic!("expected an Assembled result");
+        };
+        assert_eq!(
+            finished.parts().block_entities.entities().len(),
+            1,
+            "a cancelled Generate's parked box must not lose its block entity"
+        );
     }
 }
