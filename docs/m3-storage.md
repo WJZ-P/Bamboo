@@ -325,7 +325,10 @@ Bamboo 的 `ChunkTicks.delay` 是 i64：写之前饱和到 i32 范围并报告�
 
 超大区块：扇区数 ≥ 256（1 MiB）时写外部文件 `region/c.<x>.<z>.mcc`，区域文件里只留 5 字节桩：
 长度写 1、压缩 ID 或上 `128`（`RegionFile.EXTERNAL_STREAM_FLAG`）。
-外部文件先写临时文件，再 `Files.move(..., REPLACE_EXISTING)` 作为提交动作。
+外部文件只包含压缩流（或压缩 ID 3 的未压缩载荷），不重复 5 字节桩；
+官方 `RegionFile.writeToExternalFile` 从输出缓冲区的第 5 字节开始写。
+Bamboo 先写临时文件，最后改名提交；读取兼容历史 Bamboo 文件中重复的完整桩，
+不会为迁移而主动重写旧区块。
 
 打开文件时官方会校验并修掉坏表项（`RegionFile` 构造函数）：扇区号 < 2（压到头上）、
 扇区数 == 0、`扇区号 * 4096 > 文件大小` → 该项清零并 `warn`；头不足 8192 字节也 `warn`。
