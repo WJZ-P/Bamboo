@@ -566,20 +566,25 @@ impl Ctx<'_> {
         clicked
     }
 
-    /// 官方 `Inventory.add`：先找能叠上去的槽，再找空格。腾不出地方时返回 `false`。
-    fn add_to_inventory(&mut self, mut stack: ItemStack) -> bool {
+    /// 官方 `Inventory.add`：先找能叠上去的槽，再找空格。腾不出地方时返回 `false`，
+    /// 没放进去的数量留在 `stack` 里。
+    ///
+    /// Vanilla `Inventory.add`. Returns `false` when room runs out; what did not fit
+    /// stays in `stack`.
+    fn add_to_inventory(&mut self, stack: &mut ItemStack) -> bool {
         if stack.is_empty() {
             return false;
         }
         let mut last;
         loop {
             last = stack.count;
-            stack.count = self.add_resource(&stack);
+            stack.count = self.add_resource(stack);
             if stack.is_empty() || stack.count >= last {
                 break;
             }
         }
         if stack.count == last && self.creative {
+            stack.count = 0;
             return true;
         }
         stack.count < last
@@ -655,12 +660,16 @@ fn do_click(ctx: &mut Ctx, slot_index: i32, button: i32, input: ContainerInput) 
 
 fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool) {
     if slot_index == -999 {
+        // 官方 `player.drop(carried, true)`：左键丢出整堆，右键丢出一个。
+        // Vanilla `player.drop(carried, true)`: a left click drops the whole stack,
+        // a right click drops one.
         if !ctx.carried.is_empty() {
-            if button == 0 {
-                *ctx.carried = ItemStack::empty();
+            let dropped = if button == 0 {
+                std::mem::take(ctx.carried)
             } else {
-                split(ctx.carried, 1);
-            }
+                split(ctx.carried, 1)
+            };
+            ctx.thrown.push(dropped);
         }
         return;
     }
@@ -750,7 +759,12 @@ fn swap_with_inventory(ctx: &mut Ctx, slot_index: i32, button: i32) {
         if source.count > max {
             let taken = split(&mut ctx.inventory.slots[source_slot], max);
             ctx.set(index, taken);
-            ctx.add_to_inventory(target);
+            // 官方：`if (!inventory.add(target)) player.drop(target, true)`。
+            // Vanilla: `if (!inventory.add(target)) player.drop(target, true)`.
+            let mut target = target;
+            if !ctx.add_to_inventory(&mut target) && !target.is_empty() {
+                ctx.thrown.push(target);
+            }
         } else {
             ctx.inventory.slots[source_slot] = target;
             ctx.set(index, source);
