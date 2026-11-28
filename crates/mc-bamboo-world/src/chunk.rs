@@ -940,6 +940,16 @@ impl Chunk {
         self.archive.inhabited_time = ticks;
     }
 
+    /// 只改存档里的生成阶段（官方 `ChunkAccess.setPersistedStatus`）。生成流水线交回
+    /// 半成品时用它如实标出这一柱跑到了哪一步，不必复制整份附加信息。
+    ///
+    /// Set only the persisted generation stage (vanilla
+    /// `ChunkAccess.setPersistedStatus`), so a half-built column handed back by
+    /// the pipeline says how far it really got without cloning the metadata.
+    pub fn set_persisted_status(&mut self, status: crate::ticket::ChunkStatus) {
+        self.archive.status = status;
+    }
+
     /// 读盘组装时写入顶层附加信息。
     pub fn set_archive(&mut self, archive: ChunkArchiveMeta) {
         self.archive = archive;

@@ -148,6 +148,27 @@ impl SaveSession {
         dir.create_layout()?;
         let lock = SessionLock::acquire(&dir)?;
         let loaded = load_level_data(&dir);
+        // 只支持一个版本：区块解码只认当前的 `DataVersion`。别的版本存的世界硬开，
+        // 每个区块都会被当成读坏、从种子重新生成，下一次存盘就盖掉原来的内容。
+        // 所以在这里拒绝启动（返回时锁随之释放），不碰世界目录里的任何文件。
+        // One version only: the chunk decoder accepts the current `DataVersion`
+        // alone. Opening a world from another version would treat every chunk as
+        // unreadable, regenerate it from the seed and overwrite it on the next
+        // save. Refuse to start instead (the lock is released on return) and
+        // leave every file in the world directory alone.
+        let expected = mc_bamboo_data::version::DATA_VERSION;
+        if matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback)
+            && loaded.data.data_version != expected
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the world was saved with DataVersion {}, but only {expected} is supported; \
+                     opening it would regenerate and overwrite its chunks",
+                    loaded.data.data_version
+                ),
+            ));
+        }
         match loaded.source {
             LevelSource::Legacy => warn!(
                 path = %dir.root().display(),
@@ -541,6 +562,45 @@ mod tests {
         let tmp = TempDir::new("lock");
         let _session = SaveSession::open(&tmp.0).unwrap();
         assert!(SaveSession::open(&tmp.0).is_err());
+    }
+
+    /// 别的版本存的世界（`level.dat` 的 `DataVersion` 不是 5023）必须拒绝打开。
+    /// 区块解码只认 5023：硬开的话每个区块都被当成读坏、从种子重新生成，下一次
+    /// 存盘就把玩家的建筑盖掉，`level.dat` 的版本号也被改写成 5023。官方对更新的
+    /// 版本拒绝降级、对更旧的版本走升级，都不会这样毁档。
+    ///
+    /// A world saved by another version (`DataVersion` in `level.dat` is not
+    /// 5023) must be refused. The chunk decoder accepts 5023 only: opening it
+    /// anyway treats every chunk as unreadable, regenerates it from the seed, and
+    /// the next save replaces the player's builds while `level.dat` is rewritten
+    /// as 5023. Vanilla refuses a downgrade and upgrades older worlds; neither
+    /// destroys the save.
+    #[test]
+    fn a_world_saved_by_another_version_is_refused() {
+        use mc_bamboo_data::version::DATA_VERSION;
+        use mc_bamboo_storage::world_dir::save_level_data;
+
+        for other in [DATA_VERSION - 1, DATA_VERSION + 1] {
+            let tmp = TempDir::new(&format!("other-version-{other}"));
+            let dir = WorldDir::new(&tmp.0);
+            dir.create_layout().unwrap();
+            let level = LevelData {
+                data_version: other,
+                ..LevelData::default()
+            };
+            save_level_data(&dir, &level).unwrap();
+            let before = std::fs::read(dir.level_dat()).unwrap();
+
+            let error = SaveSession::open(&tmp.0)
+                .expect_err("a world from another version must not be opened");
+            assert!(error.to_string().contains(&other.to_string()), "{error}");
+            assert_eq!(std::fs::read(dir.level_dat()).unwrap(), before);
+
+            // 拒绝之后锁已经放开：同版本的世界照常能开。
+            // The lock is released after the refusal: a matching world still opens.
+            save_level_data(&dir, &LevelData::default()).unwrap();
+            assert!(SaveSession::open(&tmp.0).is_ok());
+        }
     }
 
     #[test]

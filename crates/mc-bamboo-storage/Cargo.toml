@@ -17,3 +17,4 @@ mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-world.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

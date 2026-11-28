@@ -156,18 +156,35 @@ impl ChunkCodec for InlineCodec {
         // `persisted_status` 交给 Director 决定从哪一步续跑。
         // Vanilla parses every non-full ProtoChunk and resumes from its status.
         let chunk_tag = parse_named(chunk_bytes)?;
-        let entities_tag = match &packed.entities {
-            Some(bytes) => Some(parse_named(bytes)?),
-            None => None,
-        };
+        // 官方 `EntityStorage.loadEntities` 读坏了只报告、当成空，区块本体照常加载。
+        // 实体 NBT 坏了不能让整个区块解码失败：那会从头生成、盖掉盘上的方块。
+        // Official `EntityStorage.loadEntities` reports a bad read and loads
+        // nothing; the chunk itself still loads. Broken entity NBT must not fail
+        // the whole decode, which would regenerate over the blocks on disk.
+        let entities_tag = packed.entities.as_deref().and_then(|bytes| {
+            parse_named(bytes)
+                .inspect_err(|error| {
+                    warn!(x = pos.x, z = pos.z, %error, "bad entity NBT; loading the chunk without entities");
+                })
+                .ok()
+        });
         let mut decoded = chunk_content::decode(pos, &chunk_tag, entities_tag.as_ref())
             .map_err(|e| e.to_string())?;
         for problem in &decoded.problems {
             warn!(at = %problem.at, message = %problem.message, "chunk decode problem");
         }
         if let Some(bytes) = &packed.poi {
-            let poi_tag = parse_named(bytes)?;
-            let (poi, version_changed) = decode_poi(&poi_tag);
+            // 官方 `SectionStorage` 读坏了记错误、当成没有数据；`decode_poi` 对
+            // 解不出来的标签同样返回空列并标记重写。
+            // Official `SectionStorage` logs a bad read and continues with no
+            // data; `decode_poi` likewise returns an empty column marked for rewrite.
+            let (poi, version_changed) = match parse_named(bytes) {
+                Ok(poi_tag) => decode_poi(&poi_tag),
+                Err(error) => {
+                    warn!(x = pos.x, z = pos.z, %error, "bad POI NBT; rebuilding POI for the chunk");
+                    (PoiColumn::default(), true)
+                }
+            };
             // 官方 `PackedChunk.versionChanged` 会给读到的每个段 `setDirty`；
             // 这里按区块标脏，让这次读盘后的第一份快照把新版本写回去。
             if version_changed {
@@ -281,6 +298,61 @@ mod tests {
         let back = codec.decode(pos, &old).unwrap();
         assert!(back.column.poi_version_changed());
         assert!(back.column.poi().sections[&-4].get(at).is_some());
+    }
+
+    /// 官方把实体（`EntityStorage`）和 POI（`SectionStorage`）分开读：读坏了只
+    /// 报告、当成空，区块本体照常加载。实体或 POI 的 NBT 坏了不能让整个区块
+    /// 解码失败——那会从头生成，把盘上的方块盖掉。
+    ///
+    /// Vanilla loads entities (`EntityStorage`) and POI (`SectionStorage`)
+    /// separately: a bad read is reported and treated as empty while the chunk
+    /// still loads. Broken entity or POI NBT must not fail the whole decode,
+    /// which would regenerate the chunk over the blocks on disk.
+    #[test]
+    fn broken_entity_or_poi_nbt_keeps_the_chunk_blocks() {
+        use mc_bamboo_data::blocks;
+
+        let pos = ChunkPos::new(0, 0);
+        let mut column = RegionColumn::from_template();
+        column
+            .column_mut()
+            .chunk_mut()
+            .set_block(4, -60, 7, blocks::DIAMOND_BLOCK);
+        let good = InlineCodec.encode(pos, &column).unwrap();
+        let wrong_version = named_bytes(&Tag::Compound(vec![
+            (
+                "DataVersion".to_owned(),
+                Tag::Int(mc_bamboo_data::version::DATA_VERSION - 1),
+            ),
+            ("Position".to_owned(), Tag::IntArray(vec![0, 0])),
+            ("Entities".to_owned(), Tag::List(Vec::new())),
+        ]));
+        type Blob = Option<Vec<u8>>;
+        let cases: [(&str, Blob, Blob); 3] = [
+            ("garbage entity bytes", Some(vec![0xff; 16]), None),
+            (
+                "entity file from another version",
+                Some(wrong_version),
+                None,
+            ),
+            ("garbage POI bytes", None, Some(vec![0xff; 16])),
+        ];
+        for (name, entities, poi) in cases {
+            let packed = PackedChunk {
+                chunk: good.chunk.clone(),
+                entities,
+                poi,
+            };
+            let decoded = InlineCodec
+                .decode(pos, &packed)
+                .unwrap_or_else(|error| panic!("{name}: the chunk must still load: {error}"));
+            assert_eq!(decoded.persisted_status, ChunkStatus::Full, "{name}");
+            assert_eq!(
+                decoded.column.column().chunk().block(4, -60, 7),
+                blocks::DIAMOND_BLOCK,
+                "{name}"
+            );
+        }
     }
 
     #[test]

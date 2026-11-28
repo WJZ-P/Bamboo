@@ -2112,6 +2112,7 @@ dependencies = [
  "mc-bamboo-protocol",
  "mc-bamboo-world",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
