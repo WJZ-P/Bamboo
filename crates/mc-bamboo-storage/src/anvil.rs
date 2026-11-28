@@ -407,7 +407,11 @@ impl RegionFile {
         let record_len = payload_len
             .checked_add(4)
             .ok_or(AnvilError::TooLarge(compressed.len()))?;
-        let external = record_len > EXTERNAL_SECTORS * SECTOR_BYTES;
+        // 官方 `RegionFile.write`：`sizeToSectors(size) >= 256` 就外置，也就是记录
+        // 超过 255 个扇区。正好 256 个扇区的记录放不进 8 位的扇区数。
+        // Official `RegionFile.write`: external when `sizeToSectors(size) >= 256`,
+        // i.e. past 255 sectors. A 256-sector record cannot fit the 8-bit count.
+        let external = record_len.div_ceil(SECTOR_BYTES) >= EXTERNAL_SECTORS;
         let length = if external {
             1i32
         } else {
