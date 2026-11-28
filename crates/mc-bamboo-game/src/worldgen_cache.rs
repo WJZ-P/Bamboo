@@ -205,11 +205,11 @@ fn idle_elapsed(idle_ms: u64, last_use: u64, now: u64) -> bool {
     idle_ms > 0 && last_use != 0 && now.saturating_sub(last_use - 1) >= idle_ms
 }
 
-/// 3×3 / 5×5 邻域里 `(dx, dz)` 的位下标（行优先，`radius` 是 1 或 2）。
-/// Bit index of `(dx, dz)` in a 3×3 / 5×5 neighborhood (row-major).
-fn neighborhood_bit(dx: i32, dz: i32, radius: i32) -> u32 {
-    let side = 2 * radius + 1;
-    ((dz + radius) * side + (dx + radius)) as u32
+/// 3×3 邻域里 `(dx, dz)` 的位下标（行优先）。
+///
+/// Bit index of `(dx, dz)` in a 3×3 neighborhood (row-major).
+fn neighborhood_bit(dx: i32, dz: i32) -> u32 {
+    ((dz + 1) * 3 + (dx + 1)) as u32
 }
 
 fn dependency_release_applies(config: &WorldGenConfig) -> bool {
@@ -221,15 +221,14 @@ fn dependency_release_applies(config: &WorldGenConfig) -> bool {
 /// 区块 `pos` 完工组装了：它的 `features` / `light` 阶段不会再读缓存。
 ///
 /// * `light` 直接读 3×3 的地形 → 给 `pos ± 1` 的地形条目记「这个使用者完工」；
-/// * `features` 读 3×3 个中心的地物结果、`light` 读 5×5 个 → 给 `pos ± 2` 的
-///   地物条目记一位。
+/// * `features` 和局部 `light` 都只读 3×3 个地物中心 → 给 `pos ± 1` 的地物条目记一位。
 ///
 /// 由世界线程在 `Task::Assemble` 里调；只拿分片锁做查表，不做 IO。
 ///
 /// Chunk `pos` has been assembled, so its `features` / `light` stages will not
 /// read the caches again. `light` reads the 3×3 terrain directly, so terrain
-/// entries at `pos ± 1` get this consumer's bit; `features` reads 3×3 feature
-/// results and `light` 5×5, so feature entries at `pos ± 2` get one. Called by
+/// entries at `pos ± 1` get this consumer's bit; `features` and local `light`
+/// both read 3×3 feature results, so feature entries at `pos ± 1` get one. Called by
 /// the world thread in `Task::Assemble`; it only takes shard locks for map
 /// operations, never IO.
 pub fn chunk_finished(config: &WorldGenConfig, pos: ChunkPos) {
@@ -240,13 +239,8 @@ pub fn chunk_finished(config: &WorldGenConfig, pos: ChunkPos) {
         for dx in -1..=1 {
             // 条目在 `pos + d`，从条目看使用者在 `-d`。
             // The entry sits at `pos + d`; seen from it the consumer is at `-d`.
-            let bit = neighborhood_bit(-dx, -dz, 1);
+            let bit = neighborhood_bit(-dx, -dz);
             crate::worldgen::mark_terrain_chunk_finished(config, pos.x + dx, pos.z + dz, bit);
-        }
-    }
-    for dz in -2..=2 {
-        for dx in -2..=2 {
-            let bit = neighborhood_bit(-dx, -dz, 2);
             crate::worldgen_features::mark_feature_chunk_finished(
                 config,
                 pos.x + dx,
@@ -268,7 +262,7 @@ pub(crate) fn feature_run_computed(config: &WorldGenConfig, cx: i32, cz: i32) {
     }
     for dz in -1..=1 {
         for dx in -1..=1 {
-            let bit = neighborhood_bit(-dx, -dz, 1);
+            let bit = neighborhood_bit(-dx, -dz);
             crate::worldgen::mark_terrain_feature_run(config, cx + dx, cz + dz, bit);
         }
     }
@@ -277,9 +271,6 @@ pub(crate) fn feature_run_computed(config: &WorldGenConfig, cx: i32, cz: i32) {
 /// 3×3 使用者全部完成时的位图。
 /// Bitmap value when all 3×3 consumers are done.
 pub(crate) const ALL_3X3: u32 = (1 << 9) - 1;
-/// 5×5 使用者全部完成时的位图。
-/// Bitmap value when all 5×5 consumers are done.
-pub(crate) const ALL_5X5: u32 = (1 << 25) - 1;
 
 #[cfg(test)]
 mod tests {
@@ -287,17 +278,15 @@ mod tests {
 
     #[test]
     fn neighborhood_bits_are_distinct_and_fill_the_mask() {
-        for (radius, all) in [(1, ALL_3X3), (2, ALL_5X5)] {
-            let mut mask = 0_u32;
-            for dz in -radius..=radius {
-                for dx in -radius..=radius {
-                    let bit = 1 << neighborhood_bit(dx, dz, radius);
-                    assert_eq!(mask & bit, 0, "bit reused at ({dx},{dz})");
-                    mask |= bit;
-                }
+        let mut mask = 0_u32;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let bit = 1 << neighborhood_bit(dx, dz);
+                assert_eq!(mask & bit, 0, "bit reused at ({dx},{dz})");
+                mask |= bit;
             }
-            assert_eq!(mask, all);
         }
+        assert_eq!(mask, ALL_3X3);
     }
 
     #[test]

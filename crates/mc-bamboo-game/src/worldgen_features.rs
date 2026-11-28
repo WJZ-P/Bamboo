@@ -717,8 +717,9 @@ struct FeatureShard {
     inflight: HashMap<FeatureCacheKey, FeatureSlot>,
     order: std::collections::VecDeque<FeatureCacheKey>,
     bytes: usize,
-    /// 每条条目「5×5 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
-    /// Per-entry bitmap of assembled chunks in its 5×5; the entry is dropped
+    /// 每条条目「3×3 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
+    ///
+    /// Per-entry bitmap of assembled chunks in its 3×3; the entry is dropped
     /// once it is full (see `worldgen_cache`).
     finished: HashMap<FeatureCacheKey, u32>,
 }
@@ -790,11 +791,11 @@ pub(crate) fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> Fe
     )
 }
 
-/// `(cx, cz)` 的 5×5 里第 `bit` 个区块已经完工；25 个都完工就删掉这条地物结果。
+/// `(cx, cz)` 的 3×3 里第 `bit` 个区块已经完工；9 个都完工就删掉这条地物结果。
 /// 条目不在缓存里时什么都不做。
 ///
-/// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
-/// feature result once all 25 are. Missing entries are left alone. The removed
+/// Chunk `bit` of the 3×3 around `(cx, cz)` has been assembled; drop this
+/// feature result once all nine are. Missing entries are left alone. The removed
 /// result is freed outside the lock.
 pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
     let key = feature_cache_key(config, cx, cz);
@@ -806,7 +807,7 @@ pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: 
     }
     let done = shard.finished.entry(key.clone()).or_default();
     *done |= 1 << bit;
-    if *done != crate::worldgen_cache::ALL_5X5 {
+    if *done != crate::worldgen_cache::ALL_3X3 {
         return;
     }
     let removed = shard.remove_entry(&key);
@@ -1789,12 +1790,13 @@ mod tests {
         );
     }
 
-    /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
+    /// 按依赖释放：3×3 个区块都完工，这个中心的地物结果才删；删了再要，
     /// 现算出来的和原来逐条相同。
-    /// Dependency release: a center's feature result goes only once all 5×5
+    ///
+    /// Dependency release: a center's feature result goes only once all 3×3
     /// chunks are assembled; asking again recomputes identical writes.
     #[test]
-    fn feature_run_is_released_when_its_5x5_is_assembled() {
+    fn feature_run_is_released_when_its_3x3_is_assembled() {
         let config = normal(0x0fea_7c0e);
         let (cx, cz) = (12, 6);
         let cached = |config: &WorldGenConfig| {
@@ -1803,15 +1805,16 @@ mod tests {
             shard.entries.contains_key(&key)
         };
         let first = cached_feature_run(&config, cx, cz).unwrap();
-        let positions: Vec<ChunkPos> = (-2..=2)
-            .flat_map(|dz| (-2..=2).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
+        let positions: Vec<ChunkPos> = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
             .collect();
-        for &pos in &positions[..24] {
+        crate::worldgen_cache::chunk_finished(&config, ChunkPos::new(cx + 2, cz));
+        for &pos in &positions[..8] {
             crate::worldgen_cache::chunk_finished(&config, pos);
         }
-        assert!(cached(&config), "one chunk of the 5x5 is not assembled");
-        crate::worldgen_cache::chunk_finished(&config, positions[24]);
-        assert!(!cached(&config), "the whole 5x5 is assembled");
+        assert!(cached(&config), "one chunk of the 3x3 is not assembled");
+        crate::worldgen_cache::chunk_finished(&config, positions[8]);
+        assert!(!cached(&config), "the whole 3x3 is assembled");
         let again = cached_feature_run(&config, cx, cz).unwrap();
         assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
         assert_eq!(first.deltas, again.deltas);
