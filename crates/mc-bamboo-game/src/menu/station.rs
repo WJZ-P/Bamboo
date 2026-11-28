@@ -3769,25 +3769,39 @@ pub(crate) fn finish(region: &mut Region, id: PlayerId, menu: &mut Menu, return_
     }
 }
 
-/// 玩家离开时，把 2×2 里的材料放回背包。结果预览丢掉。
+/// 官方 `InventoryMenu.removed`：关物品栏或者玩家离开时，先把光标上的东西放回背包，
+/// 再把 2×2 里的材料放回去。结果预览丢掉。合成格动过就把这五格发回客户端：客户端关界面时
+/// 不清自己的合成格。
 ///
-/// On leave, put the 2×2 ingredients back into the inventory. The result preview is discarded.
+/// Vanilla `InventoryMenu.removed`, on closing the inventory or leaving: the carried stack
+/// goes back into the inventory first, then the 2×2 ingredients. The result preview is
+/// discarded. When the grid changed its five slots are sent back, because the client does
+/// not clear its own crafting grid when the screen closes.
 pub(crate) fn return_player_grid(region: &mut Region, id: PlayerId) {
-    let stacks = {
+    let (carried, stacks, grid_changed) = {
         let Some(player) = region.players.get_mut(&id) else {
             return;
         };
+        let carried = std::mem::take(&mut player.inventory_cursor.carried);
+        let grid_changed = player.inventory.slots[..5]
+            .iter()
+            .any(|stack| !stack.is_empty());
         let stacks: Vec<_> = (1..5)
             .map(|slot| std::mem::take(&mut player.inventory.slots[slot]))
             .collect();
         player.inventory.slots[0] = ItemStack::empty();
-        player.inventory_cursor.carried = ItemStack::empty();
         player.inventory_cursor.quickcraft_status = 0;
         player.inventory_cursor.quickcraft_slots.clear();
-        stacks
+        (carried, stacks, grid_changed)
     };
+    super::place_item_back_in_inventory(region, id, carried);
     for stack in stacks {
         super::place_item_back_in_inventory(region, id, stack);
+    }
+    if grid_changed && let Some(player) = region.players.get_mut(&id) {
+        for slot in 0..5 {
+            crate::inventory::send_slot(player, &mut region.links, slot);
+        }
     }
 }
 
