@@ -501,6 +501,31 @@ mod tests {
         }
     }
 
+    /// 官方 `handleMovePlayer` 第一件事就是 `containsInvalidValues`，骑在载具上也一样。
+    /// 乘客的移动包只更新朝向，不先查的话 NaN 会直接写进玩家的朝向。
+    ///
+    /// Vanilla `handleMovePlayer` checks `containsInvalidValues` first, for passengers too.
+    /// A passenger's move packet only updates the rotation, so without the check a NaN
+    /// would be stored as the player's rotation.
+    #[test]
+    fn non_finite_rotation_kicks_a_passenger_too() {
+        for bad in [(f32::NAN, 0.0), (0.0, f32::INFINITY)] {
+            let (mut region, recorder) = settled_region();
+            region
+                .players
+                .get_mut(&PLAYER)
+                .expect("玩家在世界里")
+                .riding
+                .vehicle = Some(12_345);
+
+            on_move_player(&mut region, PLAYER, None, Some(bad), false, false);
+
+            assert!(recorder.closed());
+            assert!(player(&region).yaw.is_finite());
+            assert!(player(&region).pitch.is_finite());
+        }
+    }
+
     #[test]
     fn missing_fields_keep_the_current_values() {
         let (mut region, _) = settled_region();

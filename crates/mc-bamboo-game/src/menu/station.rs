@@ -391,6 +391,11 @@ pub(crate) struct Station {
     selected: u8,
     /// 本次点击要播的收纳袋音效，游戏层在点击结束后发出去。
     pub(crate) bundle_sounds: Vec<super::bundle::Sound>,
+    /// 本次点击丢出菜单的物品堆，按丢出的先后排。真实世界在点击结束后逐堆生成物品实体。
+    ///
+    /// Stacks this click threw out of the menu, in throw order. A real world spawns
+    /// one item entity per stack after the click.
+    thrown: Vec<ItemStack>,
     /// 切石机上次看到的输入物品。只比物品种类，不比数量。
     ///
     /// Last stonecutter input item. Compared by item id, not count.
@@ -502,6 +507,7 @@ impl Station {
             experience_level: 0,
             selected: 0,
             bundle_sounds: Vec::new(),
+            thrown: Vec::new(),
             stone_input: ItemStack::empty(),
             stone_recipes: Vec::new(),
             machine_set: [false; 5],
@@ -2433,10 +2439,14 @@ impl Station {
     }
 
     fn discard(&mut self, stack: ItemStack) {
-        // 没有物品实体。丢掉的东西消失，不抽世界随机数：官方丢物品用的是实体自己的随机源。
-        // No item entities. Dropped stacks vanish and do not draw level random: vanilla item
-        // drops use the entity's own random source.
-        let _ = stack;
+        // 官方 `player.drop(stack, ...)`。菜单自己够不着世界，先记下来，点击结束后由调用方
+        // 生成物品实体。重放题没有世界，记下的物品堆没人取。
+        // Vanilla `player.drop(stack, ...)`. The menu cannot reach the world, so the stack
+        // is recorded and the caller spawns the item entity after the click. Replays have
+        // no world and never take the recorded stacks.
+        if !stack.is_empty() {
+            self.thrown.push(stack);
+        }
     }
 
     fn broadcast(&mut self) {
@@ -3285,6 +3295,11 @@ fn apply_click(
         station.receive(*slot, hash.clone());
     }
     station.remote_carried.receive(packet.carried.clone());
+    // 官方在点击当中就 `player.drop`，排在取结果的世界效果之前。
+    // Vanilla calls `player.drop` during the click, before the take-result world effects.
+    for stack in std::mem::take(&mut station.thrown) {
+        crate::drops::spawn_throw(region, id, stack);
+    }
     let sounds = std::mem::take(&mut station.bundle_sounds);
     super::bundle::send_sounds(region, id, &sounds);
     let anvil_cost = std::mem::take(&mut station.anvil_cost);
@@ -3452,7 +3467,7 @@ pub(crate) fn click_inventory(region: &mut Region, id: PlayerId, packet: ClickPa
         send_outgoing(region, id, 0, packets);
         return;
     }
-    let (packets, sounds) = {
+    let (packets, sounds, thrown) = {
         let Some(player) = region.players.get_mut(&id) else {
             return;
         };
@@ -3486,8 +3501,15 @@ pub(crate) fn click_inventory(region: &mut Region, id: PlayerId, packet: ClickPa
         (
             std::mem::take(&mut station.packets),
             std::mem::take(&mut station.bundle_sounds),
+            std::mem::take(&mut station.thrown),
         )
     };
+    // 官方 `player.drop`：点窗口外、Q、放不回物品栏的东西都生成物品实体。
+    // Vanilla `player.drop`: a click outside the window, Q, and whatever does not fit
+    // back into the inventory all become item entities.
+    for stack in thrown {
+        crate::drops::spawn_throw(region, id, stack);
+    }
     send_outgoing(region, id, 0, packets);
     super::bundle::send_sounds(region, id, &sounds);
     // 玩家物品栏菜单的音效在写完玩家状态、发完包之后再发给所有人。
@@ -3747,25 +3769,39 @@ pub(crate) fn finish(region: &mut Region, id: PlayerId, menu: &mut Menu, return_
     }
 }
 
-/// 玩家离开时，把 2×2 里的材料放回背包。结果预览丢掉。
+/// 官方 `InventoryMenu.removed`：关物品栏或者玩家离开时，先把光标上的东西放回背包，
+/// 再把 2×2 里的材料放回去。结果预览丢掉。合成格动过就把这五格发回客户端：客户端关界面时
+/// 不清自己的合成格。
 ///
-/// On leave, put the 2×2 ingredients back into the inventory. The result preview is discarded.
+/// Vanilla `InventoryMenu.removed`, on closing the inventory or leaving: the carried stack
+/// goes back into the inventory first, then the 2×2 ingredients. The result preview is
+/// discarded. When the grid changed its five slots are sent back, because the client does
+/// not clear its own crafting grid when the screen closes.
 pub(crate) fn return_player_grid(region: &mut Region, id: PlayerId) {
-    let stacks = {
+    let (carried, stacks, grid_changed) = {
         let Some(player) = region.players.get_mut(&id) else {
             return;
         };
+        let carried = std::mem::take(&mut player.inventory_cursor.carried);
+        let grid_changed = player.inventory.slots[..5]
+            .iter()
+            .any(|stack| !stack.is_empty());
         let stacks: Vec<_> = (1..5)
             .map(|slot| std::mem::take(&mut player.inventory.slots[slot]))
             .collect();
         player.inventory.slots[0] = ItemStack::empty();
-        player.inventory_cursor.carried = ItemStack::empty();
         player.inventory_cursor.quickcraft_status = 0;
         player.inventory_cursor.quickcraft_slots.clear();
-        stacks
+        (carried, stacks, grid_changed)
     };
+    super::place_item_back_in_inventory(region, id, carried);
     for stack in stacks {
         super::place_item_back_in_inventory(region, id, stack);
+    }
+    if grid_changed && let Some(player) = region.players.get_mut(&id) {
+        for slot in 0..5 {
+            crate::inventory::send_slot(player, &mut region.links, slot);
+        }
     }
 }
 

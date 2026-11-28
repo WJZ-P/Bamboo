@@ -750,6 +750,14 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         crate::player_attack::on_attack(region, id, entity_id);
         return;
     };
+    // 官方 `handleAttack`：旁观者、够不着的目标、边界外的目标都到不了 `Player.attack`。
+    // 实体 ID 是客户端报的，不查的话远处的船和矿车也能被打坏。
+    // Vanilla `handleAttack`: a spectator, a target out of reach or outside the border
+    // never gets to `Player.attack`. The entity id comes from the client, so without
+    // this a distant boat or minecart could be broken.
+    if !crate::player_attack::may_attack_vehicle(region, id, entity_id) {
+        return;
+    }
     // `Player.attack` 对载具（非生物目标）算出的 `f`：含充能、武器、附魔、
     // 暴击。交给 `VehicleEntity.hurtServer` 累计 `damage += f*10`。
     // The charge / weapon / enchantment / crit math for a non-mob vehicle target.

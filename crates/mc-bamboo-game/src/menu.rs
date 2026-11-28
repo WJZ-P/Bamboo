@@ -566,20 +566,25 @@ impl Ctx<'_> {
         clicked
     }
 
-    /// 官方 `Inventory.add`：先找能叠上去的槽，再找空格。腾不出地方时返回 `false`。
-    fn add_to_inventory(&mut self, mut stack: ItemStack) -> bool {
+    /// 官方 `Inventory.add`：先找能叠上去的槽，再找空格。腾不出地方时返回 `false`，
+    /// 没放进去的数量留在 `stack` 里。
+    ///
+    /// Vanilla `Inventory.add`. Returns `false` when room runs out; what did not fit
+    /// stays in `stack`.
+    fn add_to_inventory(&mut self, stack: &mut ItemStack) -> bool {
         if stack.is_empty() {
             return false;
         }
         let mut last;
         loop {
             last = stack.count;
-            stack.count = self.add_resource(&stack);
+            stack.count = self.add_resource(stack);
             if stack.is_empty() || stack.count >= last {
                 break;
             }
         }
         if stack.count == last && self.creative {
+            stack.count = 0;
             return true;
         }
         stack.count < last
@@ -655,12 +660,16 @@ fn do_click(ctx: &mut Ctx, slot_index: i32, button: i32, input: ContainerInput) 
 
 fn pickup_or_quick_move(ctx: &mut Ctx, slot_index: i32, button: i32, quick: bool) {
     if slot_index == -999 {
+        // 官方 `player.drop(carried, true)`：左键丢出整堆，右键丢出一个。
+        // Vanilla `player.drop(carried, true)`: a left click drops the whole stack,
+        // a right click drops one.
         if !ctx.carried.is_empty() {
-            if button == 0 {
-                *ctx.carried = ItemStack::empty();
+            let dropped = if button == 0 {
+                std::mem::take(ctx.carried)
             } else {
-                split(ctx.carried, 1);
-            }
+                split(ctx.carried, 1)
+            };
+            ctx.thrown.push(dropped);
         }
         return;
     }
@@ -750,7 +759,12 @@ fn swap_with_inventory(ctx: &mut Ctx, slot_index: i32, button: i32) {
         if source.count > max {
             let taken = split(&mut ctx.inventory.slots[source_slot], max);
             ctx.set(index, taken);
-            ctx.add_to_inventory(target);
+            // 官方：`if (!inventory.add(target)) player.drop(target, true)`。
+            // Vanilla: `if (!inventory.add(target)) player.drop(target, true)`.
+            let mut target = target;
+            if !ctx.add_to_inventory(&mut target) && !target.is_empty() {
+                ctx.thrown.push(target);
+            }
         } else {
             ctx.inventory.slots[source_slot] = target;
             ctx.set(index, source);
@@ -1255,20 +1269,36 @@ pub(crate) fn close_menu(region: &mut Region, id: PlayerId) {
 }
 
 /// 客户端自己关掉了菜单。官方不看 `container_id`，也不回包。
+///
+/// 官方 `doCloseContainer` 调的是 `containerMenu.removed`：没开别的菜单时关的就是物品栏
+/// 菜单，`InventoryMenu.removed` 把光标上的东西和 2×2 合成格里的材料放回物品栏。
+///
+/// The client closed its menu. Vanilla `doCloseContainer` calls `containerMenu.removed`;
+/// with no other menu open that is the inventory menu, whose `removed` puts the carried
+/// stack and the 2×2 crafting ingredients back into the inventory.
 pub(crate) fn on_close_request(region: &mut Region, id: PlayerId) {
     let Some(mut menu) = region.menus.remove(&id) else {
+        station::return_player_grid(region, id);
         return;
     };
     finish_menu(region, id, &mut menu, true);
 }
 
-/// 玩家断开。官方这时不把光标上的东西放回物品栏，因为没有连接可发了。
+/// 玩家断开，或者跨岛时被强制清场。
+///
+/// 官方 `Player.remove` 先 `inventoryMenu.removed` 再 `doCloseContainer`，这时玩家已经
+/// 移除，光标、付款格和合成格里的东西都 `player.drop` 在地上。Bamboo 把它们放回物品栏，
+/// 放不下的才丢在地上：断开时紧接着就存盘，东西跟着玩家走。无论哪一种都不能直接丢弃。
+///
+/// The player disconnected, or was force-cleared while crossing islands. Vanilla
+/// `Player.remove` runs `inventoryMenu.removed` and `doCloseContainer` on a removed player,
+/// so the cursor, payment and crafting stacks are dropped on the ground. Bamboo puts them
+/// back into the inventory, which is saved right after a disconnect, and drops only what
+/// does not fit. Either way the stacks must not be discarded.
 pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
-    let Some(mut menu) = region.menus.remove(&id) else {
-        station::return_player_grid(region, id);
-        return;
-    };
-    finish_menu(region, id, &mut menu, false);
+    if let Some(mut menu) = region.menus.remove(&id) {
+        finish_menu(region, id, &mut menu, true);
+    }
     station::return_player_grid(region, id);
 }
 

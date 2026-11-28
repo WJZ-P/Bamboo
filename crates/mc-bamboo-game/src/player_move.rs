@@ -214,6 +214,16 @@ pub(crate) fn on_move_player(
     }
     let reported = position.unwrap_or(player.position());
     let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
+    // 官方 `handleMovePlayer` 最先查 `containsInvalidValues`，乘客也不例外。排在乘客分支
+    // 后面的话，乘客发来的 NaN 朝向会直接写进玩家。
+    //
+    // Vanilla `handleMovePlayer` checks `containsInvalidValues` before anything else,
+    // passengers included. Behind the passenger branch a NaN rotation from a passenger
+    // would be stored on the player.
+    if movement::invalid_position(reported, (yaw, pitch)) {
+        links.kick(id, &movement::invalid_movement());
+        return;
+    }
     // 骑在载具上时位置由 `positionRider` 决定，移动包只用来更新朝向：官方的客户端
     // 这时发的是 `move_vehicle`，这里不接受 `move_player` 带来的位置。
     //
@@ -224,10 +234,6 @@ pub(crate) fn on_move_player(
         if rotation.is_some() {
             set_rotation(player, yaw, pitch);
         }
-        return;
-    }
-    if movement::invalid_position(reported, (yaw, pitch)) {
-        links.kick(id, &movement::invalid_movement());
         return;
     }
     if position.is_some() {
