@@ -221,6 +221,22 @@ fn sync_minecart_rider_intents(region: &mut Region) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 测试专用：这条线程上建过几次自己的实体工作池。
+    ///
+    /// Test only: how many entity worker pools this thread has built for itself.
+    static LOCAL_POOLS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 测试专用：这条线程上建过几次自己的实体工作池。
+///
+/// Test only: how many entity worker pools this thread has built for itself.
+#[cfg(test)]
+pub(crate) fn local_entity_pools_built() -> usize {
+    LOCAL_POOLS_BUILT.with(std::cell::Cell::get)
+}
+
 /// 并行驱动的两段：算阶段只读区块表和实体表，落地阶段重新构造 `RegionLevel` 和 `World`。
 ///
 /// 正式服务端传启动时建好的常驻池；只有直接调这段的历史测试没有池，那里临时建一个
@@ -301,11 +317,15 @@ pub(crate) fn parallel_entity_ticks(
         });
         let owned_pool = match pool {
             Some(_) => None,
-            None => Some(
-                WorkerPool::new("bamboo-entity", threads).unwrap_or_else(|error| {
-                    panic!("could not start the entity worker pool: {error}")
-                }),
-            ),
+            None => {
+                #[cfg(test)]
+                LOCAL_POOLS_BUILT.with(|built| built.set(built.get() + 1));
+                Some(
+                    WorkerPool::new("bamboo-entity", threads).unwrap_or_else(|error| {
+                        panic!("could not start the entity worker pool: {error}")
+                    }),
+                )
+            }
         };
         let executor: &dyn mc_bamboo_blocks::entity::parallel::Executor =
             pool.or(owned_pool.as_ref()).expect("上面二选一必有执行器");
