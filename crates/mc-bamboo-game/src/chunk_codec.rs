@@ -327,7 +327,8 @@ mod tests {
             ("Position".to_owned(), Tag::IntArray(vec![0, 0])),
             ("Entities".to_owned(), Tag::List(Vec::new())),
         ]));
-        let cases: [(&str, Option<Vec<u8>>, Option<Vec<u8>>); 3] = [
+        type Blob = Option<Vec<u8>>;
+        let cases: [(&str, Blob, Blob); 3] = [
             ("garbage entity bytes", Some(vec![0xff; 16]), None),
             (
                 "entity file from another version",
