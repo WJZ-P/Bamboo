@@ -736,11 +736,16 @@ pub(crate) fn apply_pick_up(
     spit: Option<ItemStack>,
     spit_at: Vec3,
 ) {
-    let current = world.entity(item).and_then(|found| match &found.kind {
-        crate::entity::EntityKind::Item(ground) if !found.removed && !ground.stack.is_empty() => {
-            Some(ground.stack.clone())
+    // `with_entity_mut` 连这一刻刚生成、还没并进 tick 列表的物品也找得到。
+    // `with_entity_mut` also finds an item spawned this tick and not yet listed.
+    let mut current = None;
+    world.with_entity_mut(item, &mut |found| {
+        if let crate::entity::EntityKind::Item(ground) = &found.kind
+            && !found.removed
+            && !ground.stack.is_empty()
+        {
+            current = Some(ground.stack.clone());
         }
-        _ => None,
     });
     let Some(mut rest) = current else {
         me.with_mob(|_, mob| {

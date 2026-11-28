@@ -2022,14 +2022,15 @@ pub enum Command {
     PoiRelease {
         pos: BlockPos,
     },
-    /// `Villager.pickUpItem` / `Allay.pickUpItem`（`InventoryCarrier.pickUpItem`）：落地时
-    /// 对着地上物品当前的状态放进背包，再消耗或更新那堆物品。
+    /// `Villager.pickUpItem` / `Allay.pickUpItem`（`InventoryCarrier.pickUpItem`）：背包已在
+    /// tick 内加了 `taken`；落地时消耗或更新地上那堆，地上不够的部分从背包退回去。
     ///
-    /// `Villager.pickUpItem` / `Allay.pickUpItem` (`InventoryCarrier.pickUpItem`): at
-    /// commit time, add the ground item as it is now to the inventory, then discard
-    /// or shrink it.
+    /// `Villager.pickUpItem` / `Allay.pickUpItem` (`InventoryCarrier.pickUpItem`): the
+    /// tick already added `taken` to the inventory; the commit discards or shrinks
+    /// the ground item and takes back whatever the item no longer covers.
     VillagerPickUpItem {
         item: EntityUid,
+        taken: ItemStack,
     },
     /// `WorkAtComposter.compostItems`：先清空已满的堆肥桶产出骨粉。
     ///
@@ -2886,8 +2887,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::PoiRelease { pos } => {
             let _ = world.poi_release(pos);
         }
-        Command::VillagerPickUpItem { item } => {
-            super::mob::villager::apply_pick_up(world, item, me);
+        Command::VillagerPickUpItem { item, taken } => {
+            super::mob::villager::apply_pick_up(world, item, &taken, me);
         }
         Command::VillagerCompostExtract { pos } => {
             super::mob::villager::apply_compost_extract(world, pos);
