@@ -1878,3 +1878,94 @@ fn chest_boat_menu_uses_the_boat_display_name_as_title() {
         assert_eq!(open.rest(), title, "标题应该是船自己的显示名 {key}");
     }
 }
+
+/// 地上有没有一堆 `item` × `count` 的物品实体。
+///
+/// Whether an item entity holding `count` of `item` lies in the world.
+fn has_ground_item(fixture: &Fixture, item: i32, count: i32) -> bool {
+    use mc_bamboo_blocks::entity::EntityKind;
+    fixture.region.entities.iter().any(|entity| {
+        matches!(&entity.kind, EntityKind::Item(ground)
+            if ground.stack.item == item && ground.stack.count == count)
+    })
+}
+
+/// 物品栏菜单（容器 ID 0）里的一次点击。
+///
+/// One click in the inventory menu (container id 0).
+fn click_inventory(fixture: &mut Fixture, slot: i16, button: i8, input: ContainerInput) {
+    let packet = ClickPacket {
+        container_id: 0,
+        state_id: fixture.player().inventory.state_id(),
+        slot,
+        button,
+        input,
+        changed_slots: BTreeMap::new(),
+        carried: HashedStack::Empty,
+    };
+    on_click(&mut fixture.region, fixture.id, packet);
+}
+
+/// 官方 `doClick` 的 PICKUP 分支：点在窗口外（槽 -999）时左键把光标上整堆
+/// `player.drop(carried, true)` 丢出去，右键丢一个。物品不能凭空消失。
+///
+/// Vanilla `doClick`, PICKUP outside the window (slot -999): a left click drops the
+/// whole carried stack with `player.drop(carried, true)`, a right click drops one.
+/// The items must not vanish.
+#[test]
+fn clicking_outside_a_chest_menu_drops_the_carried_stack() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+    *fixture.inventory_slot(36) = ItemStack::new(items::STONE, 10);
+    fixture.click(Fixture::hotbar(0), 0, ContainerInput::Pickup);
+    assert_eq!(fixture.menu().carried, ItemStack::new(items::STONE, 10));
+
+    fixture.click(-999, 1, ContainerInput::Pickup);
+    assert_eq!(fixture.menu().carried, ItemStack::new(items::STONE, 9));
+    assert!(
+        has_ground_item(&fixture, items::STONE, 1),
+        "右键点窗口外丢出一个"
+    );
+
+    fixture.click(-999, 0, ContainerInput::Pickup);
+    assert!(fixture.menu().carried.is_empty());
+    assert!(
+        has_ground_item(&fixture, items::STONE, 9),
+        "左键点窗口外丢出剩下的整堆"
+    );
+}
+
+/// 物品栏菜单走的是工作台那套点击代码，窗口外的点击和 Q 一样要生成物品实体。
+///
+/// The inventory menu runs the workstation click code. A click outside the window and
+/// the Q key must spawn item entities there too.
+#[test]
+fn the_inventory_menu_drops_what_the_player_throws_out() {
+    let mut fixture = Fixture::new();
+    fixture
+        .region
+        .players
+        .get_mut(&fixture.id)
+        .expect("玩家应该在区里")
+        .game_mode = GameMode::Survival;
+    *fixture.inventory_slot(36) = ItemStack::new(items::STONE, 10);
+    *fixture.inventory_slot(37) = ItemStack::new(items::DIRT, 5);
+
+    click_inventory(&mut fixture, 36, 0, ContainerInput::Pickup);
+    assert!(fixture.inventory_slot(36).is_empty());
+    click_inventory(&mut fixture, -999, 0, ContainerInput::Pickup);
+    assert!(
+        has_ground_item(&fixture, items::STONE, 10),
+        "点窗口外丢出光标上的整堆"
+    );
+
+    // Ctrl+Q：整格丢出。
+    click_inventory(&mut fixture, 37, 1, ContainerInput::Throw);
+    assert!(fixture.inventory_slot(37).is_empty());
+    assert!(
+        has_ground_item(&fixture, items::DIRT, 5),
+        "Ctrl+Q 丢出整格"
+    );
+}
