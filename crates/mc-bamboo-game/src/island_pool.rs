@@ -568,6 +568,20 @@ impl Drop for Alive<'_> {
     }
 }
 
+/// tick 线程结束时收掉它自己留的实体工作池（岛的一刻里实体并行用的那几条线程）。在
+/// 线程正常退出的路上收，不留给线程本地的析构。
+///
+/// When a tick thread ends, tear down the entity worker pool it kept for
+/// itself (the threads an island's tick uses for parallel entities). Done on
+/// the thread's way out, not left to a thread-local destructor.
+struct LocalWorkers;
+
+impl Drop for LocalWorkers {
+    fn drop(&mut self) {
+        crate::interaction::release_local_entity_pool();
+    }
+}
+
 /// 一条 tick 线程：取一个岛（先取指名给自己的，再取公共队列的）、跑一刻、交回，直到
 /// 池子关掉或者没人收交回。
 ///
@@ -576,6 +590,7 @@ impl Drop for Alive<'_> {
 /// the hand-backs.
 fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, body: IslandBody) {
     let _alive = Alive(dispatch, index);
+    let _workers = LocalWorkers;
     let beacon = Arc::clone(&dispatch.lock().beacons[index]);
     island_beacon::install(Arc::clone(&beacon));
     loop {

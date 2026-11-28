@@ -71,5 +71,12 @@ fn a_thread_without_the_shared_pool_builds_its_entity_workers_once() {
         crate::interaction::parallel_entity_ticks(2, server.region(), None);
         crate::interaction::parallel_entity_ticks(2, server.region(), None);
         assert_eq!(crate::interaction::local_entity_pools_built() - before, 2);
+        // 线程结束之前收掉自己的工作池（岛的 tick 线程退出时这么做）；之后再用就重新建。
+        // A thread tears its pool down before it ends (as an island tick
+        // thread does on exit); using it again builds a new one.
+        crate::interaction::release_local_entity_pool();
+        crate::interaction::parallel_entity_ticks(2, server.region(), None);
+        assert_eq!(crate::interaction::local_entity_pools_built() - before, 3);
+        crate::interaction::release_local_entity_pool();
     });
 }

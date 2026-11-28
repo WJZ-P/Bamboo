@@ -237,10 +237,86 @@ pub(crate) fn local_entity_pools_built() -> usize {
     LOCAL_POOLS_BUILT.with(std::cell::Cell::get)
 }
 
+/// 这条线程自己的实体工作池。
+///
+/// A thread's own entity worker pool.
+type LocalPool = std::rc::Rc<mc_bamboo_blocks::entity::parallel::WorkerPool>;
+
+thread_local! {
+    /// 这条线程自己的实体工作池和它的线程数（见 [`local_entity_pool`]）。包一层
+    /// `ManuallyDrop`：线程本地的析构里不能收工作池（收的时候要等它的线程退出，Windows 上
+    /// 线程本地析构是拿着加载器锁跑的，等别的线程退出会死锁）。要收的线程在自己结束之前
+    /// 调 [`release_local_entity_pool`]；没调的，那几条空等着的线程留到进程结束。
+    ///
+    /// This thread's own entity worker pool and its thread count (see
+    /// [`local_entity_pool`]), in a `ManuallyDrop`: a thread-local destructor
+    /// must not tear the pool down (that joins its threads, and on Windows
+    /// thread-local destructors run under the loader lock, where waiting for
+    /// another thread to exit deadlocks). A thread that wants it torn down
+    /// calls [`release_local_entity_pool`] before it ends; otherwise the idle
+    /// workers stay until the process exits.
+    static LOCAL_POOL: std::cell::RefCell<Option<(usize, std::mem::ManuallyDrop<LocalPool>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 没有常驻池可用的线程自己的实体工作池：第一次用到时建好，之后每一刻复用，线程数变了
+/// 才重建。分离驱动下岛的一刻在 tick 线程上跑，拿不到主控那份常驻池；每条 tick 线程各留
+/// 一份，岛之间不共用（共用的话工作池里那把派活的锁会让一个卡死的岛堵住所有岛）。
+///
+/// The entity worker pool of a thread that has no shared pool at hand: built
+/// on first use and reused every tick, rebuilt only when the thread count
+/// changes. Under the detached drive an island's tick runs on a tick thread
+/// and cannot reach the master's pool; every tick thread keeps its own, never
+/// shared between islands (the pool's dispatch lock would let one stuck
+/// island block all the others).
+fn local_entity_pool(threads: usize) -> LocalPool {
+    LOCAL_POOL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((built_for, pool)) = slot.as_ref()
+            && *built_for == threads
+        {
+            return LocalPool::clone(pool);
+        }
+        // 线程数变了：旧的那份在这里正常收掉。
+        // The thread count changed: the old pool is torn down here, normally.
+        if let Some((_, old)) = slot.take() {
+            drop(std::mem::ManuallyDrop::into_inner(old));
+        }
+        #[cfg(test)]
+        LOCAL_POOLS_BUILT.with(|built| built.set(built.get() + 1));
+        let pool = LocalPool::new(
+            mc_bamboo_blocks::entity::parallel::WorkerPool::new("bamboo-entity", threads)
+                .unwrap_or_else(|error| panic!("could not start the entity worker pool: {error}")),
+        );
+        *slot = Some((
+            threads,
+            std::mem::ManuallyDrop::new(LocalPool::clone(&pool)),
+        ));
+        pool
+    })
+}
+
+/// 收掉这条线程自己的实体工作池，等它的线程退出。岛的 tick 线程在结束之前调它。
+///
+/// Tear down this thread's own entity worker pool and wait for its threads.
+/// An island tick thread calls it before it ends.
+pub(crate) fn release_local_entity_pool() {
+    let old = LOCAL_POOL.with(|slot| slot.borrow_mut().take());
+    if let Some((_, pool)) = old {
+        drop(std::mem::ManuallyDrop::into_inner(pool));
+    }
+}
+
 /// 并行驱动的两段：算阶段只读区块表和实体表，落地阶段重新构造 `RegionLevel` 和 `World`。
 ///
-/// 正式服务端传启动时建好的常驻池；只有直接调这段的历史测试没有池，那里临时建一个
-/// （`threads = 1` 时池里一条后台线程也不起）。
+/// 齐步驱动传启动时建好的常驻池；分离驱动下岛的 tick 线程和直接调这段的测试没有池，
+/// 用这条线程自己留的那一份（[`local_entity_pool`]；`threads = 1` 时池里一条后台线程也
+/// 不起）。
+///
+/// Lockstep passes the pool built at start-up; an island tick thread under
+/// the detached drive, and tests calling this directly, have none and use the
+/// calling thread's own ([`local_entity_pool`]; with `threads = 1` it has no
+/// background thread at all).
 pub(crate) fn parallel_entity_ticks(
     threads: usize,
     region: &mut Region,
@@ -249,7 +325,7 @@ pub(crate) fn parallel_entity_ticks(
     let game_time = region.tick.game_time();
     let entity_rules = region.entity_game_rules();
     use mc_bamboo_blocks::entity::{
-        parallel::{WorkerPool, commit, compute},
+        parallel::{commit, compute},
         view::ViewFacts,
     };
 
@@ -317,18 +393,11 @@ pub(crate) fn parallel_entity_ticks(
         });
         let owned_pool = match pool {
             Some(_) => None,
-            None => {
-                #[cfg(test)]
-                LOCAL_POOLS_BUILT.with(|built| built.set(built.get() + 1));
-                Some(
-                    WorkerPool::new("bamboo-entity", threads).unwrap_or_else(|error| {
-                        panic!("could not start the entity worker pool: {error}")
-                    }),
-                )
-            }
+            None => Some(local_entity_pool(threads)),
         };
-        let executor: &dyn mc_bamboo_blocks::entity::parallel::Executor =
-            pool.or(owned_pool.as_ref()).expect("上面二选一必有执行器");
+        let executor: &dyn mc_bamboo_blocks::entity::parallel::Executor = pool
+            .or(owned_pool.as_deref())
+            .expect("上面二选一必有执行器");
         let computed = compute(&view, entities, executor);
         profiler.lap(crate::profiler::Phase::EntityCompute);
         computed
