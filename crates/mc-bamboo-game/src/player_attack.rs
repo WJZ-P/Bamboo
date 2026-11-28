@@ -3168,6 +3168,100 @@ mod tests {
         assert_eq!(damage, base + 2.0);
     }
 
+    /// 船或矿车受的累计伤害。没打到时是 0。
+    ///
+    /// The accumulated damage of a boat or minecart; 0 when it was never hit.
+    fn vehicle_damage(region: &Region, entity_id: i32) -> f32 {
+        use mc_bamboo_blocks::entity::EntityKind;
+        match region.entities.get(entity_id).expect("载具还在").kind {
+            EntityKind::Boat(ref boat) => boat.damage,
+            EntityKind::Minecart(ref cart) => cart.damage,
+            _ => panic!("不是载具"),
+        }
+    }
+
+    /// 官方 `handleAttack` 对所有目标都先查 `isWithinAttackRange(mainHandItem, bounds, 3.0)`，
+    /// 船和矿车也一样。客户端报一个远处载具的实体 ID 不能把它打坏。
+    ///
+    /// Vanilla `handleAttack` checks `isWithinAttackRange(mainHandItem, bounds, 3.0)` for
+    /// every target, boats and minecarts included. A client naming a distant vehicle's
+    /// entity id must not damage it.
+    #[test]
+    fn vehicles_out_of_reach_are_not_hurt() {
+        use mc_bamboo_data::registries::entity_type;
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = player_holding(GameMode::Survival, ItemStack::empty());
+        player.attack_strength_ticker = 20;
+        region.insert_player(player);
+        let far = Vec3::new(20.5, 64.0, 0.5);
+        let boat = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::boat(
+                entity_type::OAK_BOAT,
+                far,
+            ));
+        let cart = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::minecart(
+                mc_bamboo_blocks::entity::minecart::MinecartKind::Rideable,
+                far,
+            ));
+
+        crate::player_hurt::on_attack(&mut region, id, boat);
+        crate::player_hurt::on_attack(&mut region, id, cart);
+
+        assert_eq!(vehicle_damage(&region, boat), 0.0, "20 格外的船打不到");
+        assert_eq!(vehicle_damage(&region, cart), 0.0, "20 格外的矿车打不到");
+    }
+
+    /// 官方 `handleAttack` 开头就是 `!this.player.isSpectator()`。
+    ///
+    /// Vanilla `handleAttack` starts with `!this.player.isSpectator()`.
+    #[test]
+    fn spectators_cannot_hurt_vehicles() {
+        use mc_bamboo_data::registries::entity_type;
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = player_holding(GameMode::Spectator, ItemStack::empty());
+        player.attack_strength_ticker = 20;
+        region.insert_player(player);
+        let boat = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::boat(
+                entity_type::OAK_BOAT,
+                Vec3::new(1.5, 64.0, 1.5),
+            ));
+
+        crate::player_hurt::on_attack(&mut region, id, boat);
+
+        assert_eq!(vehicle_damage(&region, boat), 0.0);
+    }
+
+    /// 够得着的船照常受伤，上面两条不是因为别的原因才通过。
+    ///
+    /// A boat within reach is still hurt, so the two tests above do not pass for
+    /// another reason.
+    #[test]
+    fn a_vehicle_within_reach_is_hurt() {
+        use mc_bamboo_data::registries::entity_type;
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = player_holding(GameMode::Survival, ItemStack::empty());
+        player.attack_strength_ticker = 20;
+        region.insert_player(player);
+        let boat = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::boat(
+                entity_type::OAK_BOAT,
+                Vec3::new(1.5, 64.0, 1.5),
+            ));
+
+        crate::player_hurt::on_attack(&mut region, id, boat);
+
+        assert!(vehicle_damage(&region, boat) > 0.0);
+    }
+
     /// 官方 `ApplyMobEffect` 对节肢杀手的三次取数全来自受害者自己的随机源，
     /// 顺序是 `nextInt(1)`、时长、等级；等级恒为 3，L=1 时时长恒 30 刻。
     ///
