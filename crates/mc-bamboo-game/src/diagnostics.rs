@@ -43,12 +43,21 @@ pub fn configure(dir: &Path, build_info: &str) {
     install_panic_hook();
 }
 
-/// 装 panic 钩子：panic 时写一份崩溃报告，然后照常展开/退出。
+/// 装 panic 钩子：panic 时写一份崩溃报告，再照原来的缺省钩子把消息打到 stderr，
+/// 然后照常展开/退出。用 Once 保证重复调用只装一次，不会串成多层钩子。
 ///
-/// Install the panic hook: a panic writes a crash report, then unwinds/exits as
-/// usual.
+/// Install the panic hook: a panic writes a crash report, then calls the previous
+/// default hook so the message still reaches stderr, then unwinds/exits as usual.
+/// A Once guards against repeated calls chaining multiple hooks.
 pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(write_panic_report));
+    static HOOK: OnceLock<()> = OnceLock::new();
+    HOOK.get_or_init(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            write_panic_report(info);
+            default(info);
+        }));
+    });
 }
 
 /// 把上一份 `logs/latest.log` 按官方 Log4j 的命名归档成 `logs/YYYY-MM-DD-N.log.gz`。

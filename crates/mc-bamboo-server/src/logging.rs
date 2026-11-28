@@ -11,13 +11,7 @@
 //! I/O runs on a dedicated thread: an emitting thread only formats in memory
 //! and sends once over an unbounded channel, never touching disk I/O.
 
-use std::{
-    fs, io,
-    io::Write,
-    path::Path,
-    sync::{Mutex, MutexGuard, mpsc},
-    thread,
-};
+use std::{fs, io, io::Write, path::Path, sync::mpsc, thread};
 
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -72,7 +66,7 @@ impl Drop for LineBuffer {
 /// A `MakeWriter` implementation for `tracing-subscriber`; all file I/O is on a
 /// background thread.
 pub struct NonBlockingWriter {
-    sender: Mutex<mpsc::Sender<Vec<u8>>>,
+    sender: mpsc::Sender<Vec<u8>>,
 }
 
 impl NonBlockingWriter {
@@ -84,9 +78,7 @@ impl NonBlockingWriter {
         thread::Builder::new()
             .name("bamboo-log-writer".to_owned())
             .spawn(move || write_loop(file, receiver))?;
-        Ok(Self {
-            sender: Mutex::new(sender),
-        })
+        Ok(Self { sender })
     }
 
     /// 文件打不开时的退化：只保留一个没有接收端的通道，日志被安静丢掉，控制台照常。
@@ -96,9 +88,7 @@ impl NonBlockingWriter {
     fn discard() -> Self {
         let (sender, receiver) = mpsc::channel::<Vec<u8>>();
         drop(receiver);
-        Self {
-            sender: Mutex::new(sender),
-        }
+        Self { sender }
     }
 }
 
@@ -114,12 +104,11 @@ impl<'a> MakeWriter<'a> for NonBlockingWriter {
     type Writer = LineBuffer;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let guard: MutexGuard<'_, mpsc::Sender<Vec<u8>>> = match self.sender.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // `Sender` 是 `Sync`，直接从 `&self` 克隆即可：发出日志的线程不取任何锁。
+        // `Sender` is `Sync`, so clone straight from `&self`: the emitting thread
+        // takes no lock at all.
         LineBuffer {
-            sender: guard.clone(),
+            sender: self.sender.clone(),
             bytes: Vec::new(),
         }
     }
