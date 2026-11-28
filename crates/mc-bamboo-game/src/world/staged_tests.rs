@@ -21,7 +21,7 @@ use std::{
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
 use mc_bamboo_storage::{
-    anvil::{RegionCompression, RegionFile},
+    anvil::{AnvilError, RegionCompression, RegionFile},
     chunk_io::ChunkIo,
     world_dir::WorldDir,
 };
@@ -331,6 +331,68 @@ fn promoted_corrupt_column_regenerates_like_a_missing_column() {
 }
 
 #[test]
+fn promoted_missing_external_column_regenerates_like_a_missing_column() {
+    let seed = 42;
+    let threads = 4;
+    let first = ChunkPos::new(14, 6);
+    let missing = ChunkPos::new(15, 6);
+    let expected = generated_cells_with_seed(seed, 0, &[first, missing]);
+    let temp = super::tests::D6TempDir::new("missing-external-staged");
+    let dir = WorldDir::new(&temp.0);
+    dir.create_layout().unwrap();
+    let region = dir.region_dir();
+    let mut file =
+        RegionFile::open(region.join("r.0.0.mca"), &region, RegionCompression::None).unwrap();
+    file.write(missing, Some(&vec![0; 1 << 20]), 1).unwrap();
+    file.sync().unwrap();
+    let external = region.join("c.15.6.mcc");
+    std::fs::rename(&external, region.join("fixture.mcc.offline")).unwrap();
+    assert!(file.has_chunk(missing));
+    assert!(matches!(
+        file.read(missing, 2 << 20),
+        Err(AnvilError::MissingExternal)
+    ));
+    drop(file);
+
+    let (mut world, _inbox) = staged_world(seed, threads);
+    let io = ChunkIo::open(&dir).unwrap();
+    assert!(io.has_chunk(missing), "the scan must see the Anvil stub");
+    world.master.host.set_io(io);
+    load_full_batch(&mut world, threads, &[first]);
+    assert!(!world.is_chunk_loaded(missing));
+    load_full_batch(&mut world, threads, &[missing]);
+    let actual = collect_generated_cells(&mut world, [missing].into_iter());
+    assert_same_lit_cells(&expected[&missing], &actual[&missing]);
+    println!(
+        "missing external column regenerated, cells_per_layer={}",
+        WORLD_HEIGHT as usize * 256
+    );
+}
+
+fn unload_and_save_full(world: &mut World, pos: ChunkPos) {
+    world.apply_ticket(TicketOp::Remove {
+        ty: TicketType::PlayerLoading,
+        pos,
+        level: FULL_CHUNK_LEVEL,
+    });
+    let deadline = Instant::now() + PIPELINE_WATCHDOG;
+    while world.is_chunk_loaded(pos)
+        || has_pending_work(world)
+        || !world.master.host.save_queue.is_empty()
+        || world
+            .master
+            .host
+            .io()
+            .is_some_and(|io| io.in_flight_requests() > 0 || !io.has_chunk(pos))
+    {
+        let _ = world.tick();
+        world.master.host.flush_io();
+        check_pipeline_deadline(deadline, "waiting for generated chunk reclaim and save");
+    }
+    world.master.host.flush_io();
+}
+
+#[test]
 fn generated_full_light_survives_unload_and_disk_reopen() {
     let seed = 42;
     let threads = 4;
@@ -338,54 +400,50 @@ fn generated_full_light_survives_unload_and_disk_reopen() {
     let temp = super::tests::D6TempDir::new("staged-reopen");
     let dir = WorldDir::new(&temp.0);
     dir.create_layout().unwrap();
-    let before = {
-        let (mut world, _inbox) = staged_world(seed, threads);
-        world.master.host.set_io(ChunkIo::open(&dir).unwrap());
-        world.master.host.set_reclaim_delay(0);
-        load_full_batch(&mut world, threads, &[pos]);
-        let original = collect_generated_cells(&mut world, [pos].into_iter());
-        let cell = original[&pos]
-            .blocks
-            .iter()
-            .position(|&state| state == blocks::DEEPSLATE)
-            .expect("generated deepslate");
-        let marker = BlockPos::new(
-            pos.x * 16 + (cell % 256 / 16) as i32,
-            MIN_Y + (cell / 256) as i32,
-            pos.z * 16 + (cell % 16) as i32,
-        );
+    let (mut world, mut inbox) = staged_world(seed, threads);
+    world.master.host.set_io(ChunkIo::open(&dir).unwrap());
+    world.master.host.set_reclaim_delay(0);
+    load_full_batch(&mut world, threads, &[pos]);
+    let original = collect_generated_cells(&mut world, [pos].into_iter());
+    let cell = original[&pos]
+        .blocks
+        .iter()
+        .position(|&state| state == blocks::DEEPSLATE)
+        .expect("generated deepslate");
+    let marker = BlockPos::new(
+        pos.x * 16 + (cell % 256 / 16) as i32,
+        MIN_Y + (cell / 256) as i32,
+        pos.z * 16 + (cell % 16) as i32,
+    );
+    let markers = [blocks::OBSIDIAN, blocks::COBBLESTONE, blocks::OBSIDIAN];
+    for (cycle, state) in markers.into_iter().enumerate() {
         let region = &mut world.islands.region;
-        assert!(region.chunks.set_block(marker, blocks::OBSIDIAN));
+        assert!(region.chunks.set_block(marker, state));
         region.touch(marker);
         region.chunks.finish_light_updates();
         let before = collect_generated_cells(&mut world, [pos].into_iter());
-        assert_eq!(before[&pos].blocks[cell], blocks::OBSIDIAN);
+        assert_eq!(before[&pos].blocks[cell], state);
         assert!(original[&pos].sky == before[&pos].sky);
         assert!(original[&pos].block == before[&pos].block);
-        world.apply_ticket(TicketOp::Remove {
-            ty: TicketType::PlayerLoading,
-            pos,
-            level: FULL_CHUNK_LEVEL,
-        });
-        let deadline = Instant::now() + PIPELINE_WATCHDOG;
-        while world.is_chunk_loaded(pos) || !world.master.host.io().unwrap().has_chunk(pos) {
-            let _ = world.tick();
-            world.master.host.flush_io();
-            check_pipeline_deadline(deadline, "waiting for generated chunk reclaim and save");
-        }
-        before
-    };
-    let (mut world, _inbox) = staged_world(seed, threads);
-    let io = ChunkIo::open(&dir).unwrap();
-    assert!(io.has_chunk(pos), "reopen must find the saved column");
-    world.master.host.set_io(io);
-    load_full_batch(&mut world, threads, &[pos]);
-    let after = collect_generated_cells(&mut world, [pos].into_iter());
-    assert_same_lit_cells(&before[&pos], &after[&pos]);
-    println!(
-        "saved and reopened one FULL column, cells_per_layer={}",
-        WORLD_HEIGHT as usize * 256
-    );
+        unload_and_save_full(&mut world, pos);
+        drop(world);
+        drop(inbox);
+        let (mut reopened, reopened_inbox) = staged_world(seed, threads);
+        let io = ChunkIo::open(&dir).unwrap();
+        assert!(io.has_chunk(pos), "reopen must find the saved column");
+        reopened.master.host.set_io(io);
+        reopened.master.host.set_reclaim_delay(0);
+        load_full_batch(&mut reopened, threads, &[pos]);
+        let after = collect_generated_cells(&mut reopened, [pos].into_iter());
+        assert_same_lit_cells(&before[&pos], &after[&pos]);
+        println!(
+            "cycle={}, marker={state}, cells_per_layer={}",
+            cycle + 1,
+            WORLD_HEIGHT as usize * 256
+        );
+        world = reopened;
+        inbox = reopened_inbox;
+    }
 }
 
 fn collect_generated_cells(

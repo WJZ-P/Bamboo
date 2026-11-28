@@ -2713,7 +2713,7 @@ impl DirectorHost {
                 } => {
                     let bytes = match error {
                         Some(message) => {
-                            tracing::warn!(%message, ?pos, "chunk read failed; using flat template");
+                            tracing::warn!(%message, ?pos, "chunk read failed; treating as missing");
                             None
                         }
                         None if chunk.is_none() => None,
