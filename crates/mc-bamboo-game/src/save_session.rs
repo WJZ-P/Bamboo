@@ -148,6 +148,27 @@ impl SaveSession {
         dir.create_layout()?;
         let lock = SessionLock::acquire(&dir)?;
         let loaded = load_level_data(&dir);
+        // 只支持一个版本：区块解码只认当前的 `DataVersion`。别的版本存的世界硬开，
+        // 每个区块都会被当成读坏、从种子重新生成，下一次存盘就盖掉原来的内容。
+        // 所以在这里拒绝启动（返回时锁随之释放），不碰世界目录里的任何文件。
+        // One version only: the chunk decoder accepts the current `DataVersion`
+        // alone. Opening a world from another version would treat every chunk as
+        // unreadable, regenerate it from the seed and overwrite it on the next
+        // save. Refuse to start instead (the lock is released on return) and
+        // leave every file in the world directory alone.
+        let expected = mc_bamboo_data::version::DATA_VERSION;
+        if matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback)
+            && loaded.data.data_version != expected
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the world was saved with DataVersion {}, but only {expected} is supported; \
+                     opening it would regenerate and overwrite its chunks",
+                    loaded.data.data_version
+                ),
+            ));
+        }
         match loaded.source {
             LevelSource::Legacy => warn!(
                 path = %dir.root().display(),
