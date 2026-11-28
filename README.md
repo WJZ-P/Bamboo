@@ -64,8 +64,9 @@ WebView2 的渲染进程不算在内。
 - `crash-reports/crash-YYYY-MM-DD_HH.MM.SS-server.txt`（官方 `CrashReport` 的命名）：任何
   线程 panic 时由 panic 钩子当场同步写出，含时间、Bamboo 版本、提交号和对应的 Minecraft 版本、
   线程名、位置、消息、`Backtrace::force_capture()`、每条 tick 线程正在跑哪个岛 / 哪个派出号 /
-  最后跑完哪一段，以及在线玩家的位置。钩子随后往日志里记一条带报告文件名的 ERROR，并把日志
-  刷到磁盘，再照常把消息打到 stderr。
+  最后跑完哪一段，以及在线玩家的位置。钩子随后往日志里记一条带报告文件名的 ERROR 并把日志
+  刷到磁盘；panic 消息经非阻塞的控制台那一路输出，装了文件日志时不再调 Rust 缺省钩子往
+  stderr 同步打印（理由见下面的已知限制）。
 - `crash-reports/island-dead-YYYY-MM-DD_HH.MM.SS-server.txt`：岛被判死时写一份，内容是判死
   日志的全部字段（岛号、原因、跑了多久、卡在哪一段、欠的刻数、玩家、区块）加上所有 tick 线程
   的信标和在线玩家位置；APP 关掉后仍能查到当时各岛卡在哪一段。
