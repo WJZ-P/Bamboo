@@ -456,6 +456,14 @@ impl RegionColumn {
         self.column.chunk_mut().set_archive(archive);
     }
 
+    /// 只改这一柱存档里的生成阶段，见 `Chunk::set_persisted_status`。
+    ///
+    /// Set only the column's persisted generation stage, see
+    /// `Chunk::set_persisted_status`.
+    pub(crate) fn set_persisted_status(&mut self, status: mc_bamboo_world::ticket::ChunkStatus) {
+        self.column.chunk_mut().set_persisted_status(status);
+    }
+
     /// 组装时把生成期算好的 `structures` 顶层标签装进这一柱，下一次写盘原样带回。
     ///
     /// Install the generated `structures` tag at assembly; the next save writes it
