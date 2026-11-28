@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::director::{HOME_REGION, RegionId};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{World, island_access};
 use crate::{
@@ -252,6 +252,13 @@ impl World {
             return;
         };
         let moved = other.region.chunks.loaded_positions();
+        debug!(
+            into,
+            from,
+            chunks = moved.len(),
+            players = other.region.players.len(),
+            "merging islands"
+        );
         let origin = self
             .master
             .host
@@ -332,6 +339,14 @@ impl World {
             return false;
         };
         let moved = child.region.chunks.loaded_positions();
+        debug!(
+            from,
+            to,
+            chunks = moved.len(),
+            players = child.region.players.len(),
+            ?origin,
+            "splitting an island"
+        );
         self.islands.note_derivation(origin, time);
         if let Some(target) = self.islands.get_mut(to) {
             // 空着的岛（一直在的家岛）接手这一块就是新岛：随机源换成按起源派生的那份，

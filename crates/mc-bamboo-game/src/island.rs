@@ -2252,6 +2252,7 @@ impl ChunkMailbox {
                     if !guaranteed {
                         used += 1;
                     }
+                    tracing::trace!(island, ?pos, generation, "chunk delivered to its island");
                     delivered_levels.push((pos, desired));
                     report.moves.push((pos, true));
                     report.events.push(Event::Delivered {
@@ -2272,6 +2273,17 @@ impl ChunkMailbox {
                     self.deliveries.insert(pos, (generation, desired, column));
                 }
             }
+        }
+        if !delivered_levels.is_empty() {
+            // 缺省不输出；debug 下每批一行：这一批交付了几个、信箱里还等着几个。
+            // Off by default; at debug one line per batch: how many chunks this
+            // batch delivered and how many still wait in the mailbox.
+            tracing::debug!(
+                island,
+                delivered = delivered_levels.len(),
+                waiting = self.deliveries.len(),
+                "chunk deliveries taken by the island"
+            );
         }
         // 一批交付只重算一次受影响的邻域，不逐块重算。
         region.profiler.time_sub(SubPhase::LevelsUpdate, || {
@@ -2331,8 +2343,15 @@ impl ChunkMailbox {
                 region.profiler.time_sub(SubPhase::LevelsUpdate, || {
                     region.tick_levels.reclaim(positions.iter());
                 });
+                tracing::debug!(
+                    island,
+                    reclaimed = batch.len(),
+                    waiting = self.reclaims.len(),
+                    "chunks reclaimed from the island"
+                );
                 region.profiler.start_sub(SubPhase::ReturnBoxes);
                 for (pos, generation) in batch {
+                    tracing::trace!(island, ?pos, generation, "chunk returned by its island");
                     self.reclaimed += 1;
                     report.moves.push((pos, false));
                     report.events.push(Event::Returned {
@@ -2347,6 +2366,7 @@ impl ChunkMailbox {
                 // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些
                 // 区块「正在收回」，丢了这条列表它就永远等不到回执。
                 tracing::warn!(
+                    island,
                     count = batch.len(),
                     first = ?batch.first().map(|(pos, _)| *pos),
                     "chunk reclaim was not ready, will retry"

@@ -1998,6 +1998,32 @@ impl DirectorHost {
                     Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
                     _ => None,
                 };
+                // 回执逐条记在 trace：缺省不输出，关着时只是一次级别判断。
+                // Each ack is logged at trace: off by default, and a single
+                // level check when disabled.
+                match &event {
+                    Event::Delivered {
+                        region,
+                        pos,
+                        generation,
+                    } => tracing::trace!(
+                        island = *region,
+                        ?pos,
+                        generation = *generation,
+                        "director ack: chunk delivered"
+                    ),
+                    Event::Returned {
+                        pos,
+                        generation,
+                        column,
+                    } => tracing::trace!(
+                        ?pos,
+                        generation = *generation,
+                        with_column = column.is_some(),
+                        "director ack: chunk returned"
+                    ),
+                    _ => {}
+                }
                 // 岛没了（`Lost`）同样改 owner：处理完按每个位置的真实归属告诉分区器。
                 // A lost island changes owners too: tell the partitioner each
                 // position's real owner afterwards.
@@ -2091,12 +2117,12 @@ impl DirectorHost {
             if events.is_empty() {
                 self.submit_reads();
                 self.submit_compute();
-                // 每刻收敛后一条：rounds 是这一刻处理的 Director 事件数（区块交付、
-                // 回执、等级变化），debug 打开后能看到流水线有没有卡在某一轮。
-                // One line per tick after convergence: rounds counts this tick's
-                // Director events (deliveries, acks, level changes); at debug it
-                // shows whether the pipeline stalls in a round.
-                tracing::debug!(rounds, "director pump converged (deliveries and acks)");
+                // 每次收敛后一条：rounds 是这一次处理的 Director 事件数（区块交付、
+                // 回执、等级变化）。每刻都有好几次，所以放在 trace，不放 debug。
+                // One line per convergence: rounds counts the Director events
+                // of this pump (deliveries, acks, level changes). It happens
+                // several times a tick, hence trace rather than debug.
+                tracing::trace!(rounds, "director pump converged");
                 // 对照模式只在 pump 收敛后做一次全量对账，正式路径不进这里。
                 if islands_on {
                     self.reconcile_islands();
@@ -2131,6 +2157,10 @@ impl DirectorHost {
             return;
         };
         let mut queued = std::mem::take(&mut self.read_queue);
+        tracing::debug!(
+            count = queued.len(),
+            "submitting chunk reads to the IO thread"
+        );
         // 稳定排序：同等 rank 保持 Director 派任务的顺序（TaskId 升序），结果确定。
         queued.sort_by_key(|&(pos, _, _)| self.demand_rank(pos));
         for (pos, id, generation) in queued {
@@ -2752,9 +2782,16 @@ impl DirectorHost {
                     poi,
                     error,
                 } => {
+                    tracing::trace!(
+                        ?pos,
+                        generation,
+                        found = chunk.is_some(),
+                        failed = error.is_some(),
+                        "chunk read finished"
+                    );
                     let bytes = match error {
                         Some(message) => {
-                            tracing::warn!(%message, ?pos, "chunk read failed; using flat template");
+                            tracing::warn!(%message, ?pos, generation, "chunk read failed; using flat template");
                             None
                         }
                         None if chunk.is_none() => None,
@@ -2779,6 +2816,7 @@ impl DirectorHost {
                     // 旧回执只清自己的 `(pos, seq)`，绝不抹掉较新的在途写（致命 1）。
                     // Only after a successful write does `known` reflect the disk;
                     // an older ack never clears a newer in-flight write (fatal 1).
+                    tracing::trace!(?pos, seq, present, "chunk write finished");
                     known_updates.push((pos, present, seq));
                     if self.pending_writes.get(&pos) == Some(&seq) {
                         self.pending_writes.remove(&pos);
@@ -2837,6 +2875,7 @@ impl DirectorHost {
                     // `save-all` 成功或失败消息。
                     // An async barrier ack; World drains it this tick and sends
                     // the waiting `save-all` success/failure message.
+                    tracing::debug!(seq, ok, "save barrier reached the disk");
                     self.flushed_barriers.push((seq, ok));
                 }
                 Reply::WriteFailed {
