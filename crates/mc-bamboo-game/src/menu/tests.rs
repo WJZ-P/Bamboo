@@ -1964,10 +1964,7 @@ fn the_inventory_menu_drops_what_the_player_throws_out() {
     // Ctrl+Q：整格丢出。
     click_inventory(&mut fixture, 37, 1, ContainerInput::Throw);
     assert!(fixture.inventory_slot(37).is_empty());
-    assert!(
-        has_ground_item(&fixture, items::DIRT, 5),
-        "Ctrl+Q 丢出整格"
-    );
+    assert!(has_ground_item(&fixture, items::DIRT, 5), "Ctrl+Q 丢出整格");
 }
 
 /// 快捷栏和背包里一共有多少个 `item`。
