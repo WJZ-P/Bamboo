@@ -84,6 +84,13 @@ impl InventoryCursor {
         &self.carried
     }
 
+    /// 把光标上的那堆拿走，光标变空。死亡时丢出来用。
+    ///
+    /// Take the cursor stack, leaving the cursor empty; used to drop it on death.
+    pub(crate) fn take_carried(&mut self) -> ItemStack {
+        std::mem::take(&mut self.carried)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             carried: ItemStack::empty(),
