@@ -323,6 +323,29 @@ impl World {
              its chunks will be reloaded from their last save, and every change to those chunks \
              and those players since their last save is lost"
         );
+        // 判死日志的内容再落一份到 crash-reports/，后面附上所有岛的信标；APP 关掉后也有据可查。
+        // Persist the death log plus every island's beacon to crash-reports/ so
+        // the clue survives even after the APP is closed.
+        let running_secs = running_for.map(|time| time.as_secs_f64());
+        let last_phase =
+            progress.map(|p| p.last_phase.unwrap_or("none (stuck before the first phase)"));
+        let secs_since = progress.map(|p| p.since.as_secs_f64());
+        let ticks_owed = buried.debt;
+        let player_count = buried.players.len();
+        let chunk_count = chunks.len();
+        crate::diagnostics::write_island_dead_report(&format!(
+            "an island stopped responding and was declared dead\n\
+             island = {id:?}\n\
+             cause = {cause:?}\n\
+             running_secs = {running_secs:?}\n\
+             last_finished_phase = {last_phase:?}\n\
+             secs_since_last_phase = {secs_since:?}\n\
+             ticks_owed = {ticks_owed:?}\n\
+             player_count = {player_count:?}\n\
+             players = {names:?}\n\
+             chunk_count = {chunk_count:?}\n\
+             chunks = {chunks:?}"
+        ));
         let deaths = &mut self.master.hybrid.death.deaths;
         if deaths.len() >= DEATHS_KEPT {
             deaths.remove(0);

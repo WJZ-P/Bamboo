@@ -44,7 +44,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::error;
+use tracing::{error, trace};
 
 use crate::island::Island;
 use crate::island_beacon::{self, Beacon, Progress};
@@ -612,12 +612,26 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
         };
         let started = Instant::now();
         beacon.start_tick();
+        // 缺省不输出；打开 trace 后能逐刻看到哪个派出号在哪条 tick 线程上跑。
+        // Off by default; at trace this shows which dispatch runs on which
+        // tick thread, one line per tick.
+        trace!(worker = index, ticket, "island tick starting");
         // 岛的状态在 panic 之后可能不一致，但主控拿回它只是为了照原来的崩溃路径
         // 重新抛出、不再跑它，所以这里断言可以安全地跨过 unwind。
         // The island may be inconsistent after a panic; the master only takes
         // it back to re-raise on the existing crash path and never runs it again.
         let outcome = catch_unwind(AssertUnwindSafe(|| body(&mut island)));
         let finished = Instant::now();
+        // 惰性字段：trace 关掉时连时间换算都不做，不在热路径上付格式化开销。
+        // Lazy fields: with trace off even the duration is not computed, so the
+        // hot path pays no formatting cost.
+        trace!(
+            worker = index,
+            ticket,
+            panicked = outcome.is_err(),
+            elapsed_ms = finished.duration_since(started).as_secs_f64() * 1000.0,
+            "island tick finished"
+        );
         {
             let mut queues = dispatch.lock();
             queues.busy[index] = queues.busy[index].saturating_sub(1);

@@ -2087,8 +2087,17 @@ impl World {
             }
             let running = dispatched.elapsed();
             if running >= next_report {
+                // 带上每个在跑的派出号和它信标上最后跑完的阶段：卡住时能直接看出卡在哪一段。
+                // Include each running dispatch and its beacon's last finished
+                // phase, so a stall shows where it is stuck.
+                let phases: Vec<(u64, Option<&'static str>)> = pool
+                    .slow(Duration::ZERO)
+                    .into_iter()
+                    .map(|(ticket, _, progress)| (ticket, progress.last_phase))
+                    .collect();
                 warn!(
                     seconds = running.as_secs(),
+                    ?phases,
                     "the island tick is still running"
                 );
                 next_report += ISLAND_SLOW_REPORT;

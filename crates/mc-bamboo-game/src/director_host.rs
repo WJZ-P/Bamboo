@@ -1360,6 +1360,12 @@ impl DirectorHost {
             self.save_cooldown.insert(pending.pos, now_tick);
             to_write.push(pending);
         }
+        if !to_write.is_empty() {
+            // 存档 IO：这一刻交给 IO 线程的写盘快照数，缺省不输出。
+            // Save IO: number of chunk snapshots handed to the IO thread this
+            // tick; off by default.
+            tracing::debug!(count = to_write.len(), "submitting chunk writes to the IO thread");
+        }
         if let Some(io) = &self.io {
             for pending in to_write {
                 io.submit_write_with_poi(
@@ -2082,6 +2088,12 @@ impl DirectorHost {
             if events.is_empty() {
                 self.submit_reads();
                 self.submit_compute();
+                // 每刻收敛后一条：rounds 是这一刻处理的 Director 事件数（区块交付、
+                // 回执、等级变化），debug 打开后能看到流水线有没有卡在某一轮。
+                // One line per tick after convergence: rounds counts this tick's
+                // Director events (deliveries, acks, level changes); at debug it
+                // shows whether the pipeline stalls in a round.
+                tracing::debug!(rounds, "director pump converged (deliveries and acks)");
                 // 对照模式只在 pump 收敛后做一次全量对账，正式路径不进这里。
                 if islands_on {
                     self.reconcile_islands();
