@@ -169,8 +169,12 @@ public final class StorageOracle {
                         break;
                     }
                     CompoundTag written = parsed.write();
-                    response.add("original", canonical(root));
-                    response.add("written", canonical(written));
+                    boolean includeCanonical = !request.has("includeCanonical")
+                            || request.get("includeCanonical").getAsBoolean();
+                    if (includeCanonical) {
+                        response.add("original", canonical(root));
+                        response.add("written", canonical(written));
+                    }
                     response.addProperty("writtenNbt", encode(written));
                     response.addProperty("status", parsed.chunkStatus().getName());
                     response.addProperty("sections", parsed.sectionData().size());

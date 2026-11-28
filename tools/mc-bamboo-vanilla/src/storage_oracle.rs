@@ -12,14 +12,14 @@ use std::{
     process::{Command, Stdio},
 };
 
-use mc_bamboo_core::{BlockPos, ChunkPos, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::{blocks, version};
 use mc_bamboo_nbt::{Accounter, Compression, Tag, read_compressed, read_named};
 use mc_bamboo_storage::{
     anvil::{RegionCompression, RegionPos, open_region},
     chunk_nbt::{ChunkEncodeExtra, decode_bytes, encode_bytes, field},
 };
-use mc_bamboo_world::store::ChunkStore;
+use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, store::ChunkStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -390,6 +390,8 @@ fn run_cases(
 
     // 4. 三种压缩的内置／外置区块，双向对拍。
     // 4. Cross-read inline and external chunks with all three compression modes.
+    let external_pos = ChunkPos::new(-35, 7);
+    let external_payload = padded_full_chunk(external_pos)?;
     for compression in RegionCompression::ALL {
         let id = i32::from(compression.id());
         let case = format!("compression {id}");
@@ -492,10 +494,30 @@ fn run_cases(
                 format!("{case}: Bamboo cannot read the second official chunk"),
             );
         }
-        check_external_region(stdin, lines, report, compression)?;
+        check_external_region(
+            stdin,
+            lines,
+            report,
+            compression,
+            external_pos,
+            &external_payload,
+        )?;
     }
 
     Ok(())
+}
+
+fn padded_full_chunk(pos: ChunkPos) -> Result<Vec<u8>, String> {
+    let padding = sample_bytes_with_len(42, 1 << 20);
+    let extra = ChunkEncodeExtra {
+        chunk_pos: pos,
+        preserved: vec![(
+            "BambooOraclePadding".to_owned(),
+            Tag::ByteArray(padding.into_iter().map(|byte| byte as i8).collect()),
+        )],
+        ..Default::default()
+    };
+    encode_bytes(&rich_column(7), &extra).map_err(|error| error.to_string())
 }
 
 fn check_external_region(
@@ -503,10 +525,10 @@ fn check_external_region(
     lines: &mut impl Iterator<Item = Result<String, std::io::Error>>,
     report: &mut Report,
     compression: RegionCompression,
+    pos: ChunkPos,
+    payload: &[u8],
 ) -> Result<(), String> {
     let id = compression.id();
-    let pos = ChunkPos::new(-35, 7);
-    let payload = sample_bytes_with_len(42, 1 << 20);
     let path = format!("c.{}.{}.mcc", pos.x, pos.z);
     let bamboo = TempDir::new(&format!("bamboo-external-{id}"))?;
     let official = TempDir::new(&format!("official-external-{id}"))?;
@@ -517,7 +539,7 @@ fn check_external_region(
     {
         let mut region = open(&bamboo)?;
         region
-            .write(pos, Some(&payload), 1)
+            .write(pos, Some(payload), 1)
             .and_then(|()| region.sync())
             .map_err(|error| error.to_string())?;
     }
@@ -531,14 +553,12 @@ fn check_external_region(
         json!({"command": "region-read", "dir": bamboo.0.to_string_lossy(),
                "x": pos.x, "z": pos.z, "positions": [{"x": pos.x, "z": pos.z}]}),
     )?;
+    let java_read = response
+        .chunks
+        .first()
+        .and_then(|chunk| chunk.data.as_deref());
     report.check(
-        response
-            .chunks
-            .first()
-            .and_then(|chunk| chunk.data.as_deref())
-            .and_then(|data| decode_b64(data).ok())
-            .as_deref()
-            == Some(payload.as_slice()),
+        java_read.and_then(|data| decode_b64(data).ok()).as_deref() == Some(payload),
         format!("{id}: official RegionFile did not read the Bamboo .mcc payload"),
     );
     ask(
@@ -546,15 +566,88 @@ fn check_external_region(
         lines,
         json!({"command": "region-write", "dir": official.0.to_string_lossy(),
                "x": pos.x, "z": pos.z, "compression": id,
-               "chunks": [{"x": pos.x, "z": pos.z, "data": encode_b64(&payload)}]}),
+               "chunks": [{"x": pos.x, "z": pos.z, "data": encode_b64(payload)}]}),
     )?;
     report.check(
         official.0.join(path).is_file(),
         format!("{id}: official .mcc missing"),
     );
     report.check(
-        open(&official)?.read(pos, 2 << 20).ok().flatten() == Some(payload),
+        open(&official)?
+            .read(pos, 2 << 20)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(payload),
         format!("{id}: Bamboo did not read the official .mcc payload"),
+    );
+    if compression == RegionCompression::Zlib {
+        let serialized = ask(
+            stdin,
+            lines,
+            json!({"command": "chunk-read", "nbt": java_read.ok_or("official .mcc read returned no NBT")?,
+                   "includeCanonical": false}),
+        )?;
+        check_reserialized_external_chunk(report, pos, payload, &serialized)?;
+    }
+    Ok(())
+}
+
+fn check_reserialized_external_chunk(
+    report: &mut Report,
+    pos: ChunkPos,
+    original: &[u8],
+    serialized: &Response,
+) -> Result<(), String> {
+    let written = decode_b64(
+        serialized
+            .written_nbt
+            .as_deref()
+            .ok_or("missing official chunk NBT")?,
+    )?;
+    let before = decode_bytes(original).map_err(|error| error.to_string())?;
+    let after = decode_bytes(&written).map_err(|error| error.to_string())?;
+    report.check(
+        serialized.status.as_deref() == Some("minecraft:full")
+            && after.persisted_status == before.persisted_status
+            && after.chunk_pos == pos,
+        "official external chunk changed its status or position",
+    );
+    report.check(
+        before.light_on && after.light_on,
+        "external chunk lost isLightOn",
+    );
+    let mut differing = [0_u64; 3];
+    let mut lit = [0_u64; 2];
+    for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+        for x in 0..16 {
+            for z in 0..16 {
+                let at = BlockPos::new(pos.x * 16 + x, y, pos.z * 16 + z);
+                let (a, b) = (&before.column, &after.column);
+                differing[0] += u64::from(
+                    a.chunk().block(x as usize, y, z as usize)
+                        != b.chunk().block(x as usize, y, z as usize),
+                );
+                for (index, layer) in [LightLayer::Sky, LightLayer::Block].into_iter().enumerate() {
+                    let expected = a.light_value(layer, at);
+                    lit[index] += u64::from(expected != 0);
+                    differing[index + 1] += u64::from(expected != b.light_value(layer, at));
+                }
+            }
+        }
+    }
+    report.check(
+        lit.iter().all(|&cells| cells > 0),
+        "external fixture must carry both kinds of light",
+    );
+    report.check(
+        differing == [0; 3],
+        format!("official external chunk differs: {differing:?}"),
+    );
+    println!(
+        "external FULL: payload_bytes={}, cells_per_layer={}, lit={lit:?}, differing={differing:?}",
+        original.len(),
+        WORLD_HEIGHT as usize * 256
     );
     Ok(())
 }
