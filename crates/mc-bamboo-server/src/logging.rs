@@ -47,6 +47,15 @@ use crate::config_files::BambooConfig;
 /// counted) until the writer thread catches up.
 const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
 
+/// 排队等控制台的字节数上限。控制台卡住（Windows 上选中文字、管道没人读）可能一卡就是
+/// 很久，所以比文件小：卡住期间超出的行丢掉计数，文件那一路照常完整。
+///
+/// Cap on log bytes queued for the console. A console can stall for a long
+/// time (text selected in a Windows console, an undrained pipe), so it is
+/// smaller than the file's: lines past it are dropped and counted while the
+/// file path stays complete.
+const MAX_QUEUED_CONSOLE_BYTES: usize = 8 * 1024 * 1024;
+
 /// 刷盘最多等多久：守卫 drop、panic 钩子都用它。磁盘卡死时不能把退出也卡死。
 ///
 /// How long a flush waits at most; used by the guard's drop and the panic
@@ -96,15 +105,29 @@ enum Message {
 /// State shared by emitting threads and the writer thread.
 struct Shared {
     sender: mpsc::Sender<Message>,
+    /// 这个输出最多排队多少字节。
+    ///
+    /// How many bytes this output may queue at most.
+    cap: usize,
     queued_bytes: AtomicUsize,
     dropped_lines: AtomicU64,
     writer_thread: OnceLock<ThreadId>,
 }
 
 impl Shared {
+    fn new(sender: mpsc::Sender<Message>, cap: usize) -> Self {
+        Self {
+            sender,
+            cap,
+            queued_bytes: AtomicUsize::new(0),
+            dropped_lines: AtomicU64::new(0),
+            writer_thread: OnceLock::new(),
+        }
+    }
+
     fn send_line(&self, bytes: Vec<u8>) {
         let len = bytes.len();
-        if self.queued_bytes.fetch_add(len, Ordering::Relaxed) > MAX_QUEUED_BYTES {
+        if self.queued_bytes.fetch_add(len, Ordering::Relaxed) > self.cap {
             self.queued_bytes.fetch_sub(len, Ordering::Relaxed);
             self.dropped_lines.fetch_add(1, Ordering::Relaxed);
             return;
@@ -219,14 +242,13 @@ trait Sink {
 /// Start a writer thread; `open` opens the output on that thread. If the
 /// thread cannot start the channel has no receiver, so log lines are dropped
 /// silently.
-fn spawn_writer<S: Sink>(name: &str, open: impl FnOnce() -> S + Send + 'static) -> Arc<Shared> {
+fn spawn_writer<S: Sink>(
+    name: &str,
+    cap: usize,
+    open: impl FnOnce() -> S + Send + 'static,
+) -> Arc<Shared> {
     let (sender, receiver) = mpsc::channel();
-    let shared = Arc::new(Shared {
-        sender,
-        queued_bytes: AtomicUsize::new(0),
-        dropped_lines: AtomicU64::new(0),
-        writer_thread: OnceLock::new(),
-    });
+    let shared = Arc::new(Shared::new(sender, cap));
     let for_thread = Arc::clone(&shared);
     let spawned = thread::Builder::new()
         .name(name.to_owned())
@@ -274,6 +296,10 @@ fn run_writer<S: Sink>(mut sink: S, receiver: &mpsc::Receiver<Message>, shared: 
                 }
             }
             Message::Flush(ack) => {
+                // 恢复后哪怕没有新行，刷一次也把丢行数报出来。
+                // After a recovery the drop count is reported on a flush even
+                // without a new line.
+                note_dropped(&mut sink, shared);
                 sink.flush();
                 let _ = ack.send(());
             }
@@ -289,7 +315,8 @@ fn note_dropped<S: Sink>(sink: &mut S, shared: &Shared) {
     let dropped = shared.dropped_lines.swap(0, Ordering::Relaxed);
     let note = format!(
         "[bamboo-log] {dropped} log lines were dropped here: the output fell more than \
-         {MAX_QUEUED_BYTES} queued bytes behind\n"
+         {} queued bytes behind\n",
+        shared.cap
     );
     sink.write(note.as_bytes());
 }
@@ -424,8 +451,12 @@ pub fn setup(directory: &Path, config: &BambooConfig) -> LogSetup {
     }
 
     mc_bamboo_game::diagnostics::archive_latest_log(&logs_dir);
-    let file = spawn_writer("bamboo-log-writer", move || LogFile::open(logs_dir));
-    let console = spawn_writer("bamboo-log-console", || Console { out: io::stdout() });
+    let file = spawn_writer("bamboo-log-writer", MAX_QUEUED_BYTES, move || {
+        LogFile::open(logs_dir)
+    });
+    let console = spawn_writer("bamboo-log-console", MAX_QUEUED_CONSOLE_BYTES, || Console {
+        out: io::stdout(),
+    });
     mc_bamboo_game::diagnostics::configure(&crash_dir, &build_info());
     register_background(&file, &console);
 
@@ -618,13 +649,110 @@ mod tests {
 
     fn detached_shared() -> (Arc<Shared>, mpsc::Receiver<Message>) {
         let (sender, receiver) = mpsc::channel();
-        let shared = Arc::new(Shared {
-            sender,
-            queued_bytes: AtomicUsize::new(0),
-            dropped_lines: AtomicU64::new(0),
-            writer_thread: OnceLock::new(),
+        (Arc::new(Shared::new(sender, MAX_QUEUED_BYTES)), receiver)
+    }
+
+    /// 一个卡住的控制台：第一次写就停在那里，直到测试放行；写出的字节收进内存。
+    ///
+    /// A stalled console: the first write stops until the test releases it;
+    /// written bytes are collected in memory.
+    struct StalledConsole {
+        gate: Option<mpsc::Receiver<()>>,
+        stalled: mpsc::SyncSender<()>,
+        out: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Sink for StalledConsole {
+        fn write(&mut self, bytes: &[u8]) {
+            if let Some(gate) = self.gate.take() {
+                let _ = self.stalled.send(());
+                let _ = gate.recv();
+            }
+            self.out.lock().unwrap().extend_from_slice(bytes);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    /// 控制台卡住时，发日志的线程照样很快返回：超出上限的行被丢掉计数，文件那一路一行
+    /// 不少；控制台恢复后记一行丢了几行。
+    ///
+    /// With the console stalled a logging thread still returns promptly: lines
+    /// past the cap are dropped and counted, the file path keeps every line,
+    /// and once the console recovers it records how many were dropped.
+    #[test]
+    fn a_stalled_console_does_not_block_a_logging_thread() {
+        use tracing_subscriber::prelude::*;
+
+        const LINES: usize = 2000;
+        let temp = Temp::new();
+        let (release, gate) = mpsc::channel();
+        let (stalled, console_stalled) = mpsc::sync_channel(1);
+        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let console = {
+            let out = Arc::clone(&out);
+            spawn_writer("test-stalled-console", 4096, move || StalledConsole {
+                gate: Some(gate),
+                stalled,
+                out,
+            })
+        };
+        let dir = temp.0.clone();
+        let file = spawn_writer("test-log-file", MAX_QUEUED_BYTES, move || {
+            LogFile::open(dir)
         });
-        (shared, receiver)
+        let subscriber = tracing_subscriber::registry()
+            .with(console_layer(
+                NonBlockingWriter {
+                    shared: Arc::clone(&console),
+                },
+                "info",
+            ))
+            .with(file_layer(
+                NonBlockingWriter {
+                    shared: Arc::clone(&file),
+                },
+                "info",
+            ));
+
+        let (finished, done) = mpsc::channel();
+        let logger = thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!("first line, the console stalls on it");
+                console_stalled
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the console writer reached the stalled write");
+                let started = Instant::now();
+                for index in 0..LINES {
+                    tracing::info!(index, "a line logged while the console is stalled");
+                }
+                let _ = finished.send(started.elapsed());
+            });
+        });
+        let elapsed = done
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the logging thread finished while the console was stalled");
+        logger.join().unwrap();
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        let dropped = console.dropped_lines.load(Ordering::Relaxed);
+        assert!(dropped > 0, "the console queue overflowed");
+
+        // 文件那一路完整。
+        // The file path is complete.
+        file.flush();
+        let text = fs::read_to_string(temp.0.join("latest.log")).unwrap();
+        assert_eq!(text.lines().count(), LINES + 1, "{text}");
+
+        // 控制台恢复：丢行数报出来，计数清零。
+        // The console recovers: the drop count is reported and reset.
+        release.send(()).unwrap();
+        console.flush();
+        let shown = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        assert!(
+            shown.contains(&format!("{dropped} log lines were dropped here")),
+            "{shown}"
+        );
+        assert_eq!(console.dropped_lines.load(Ordering::Relaxed), 0);
     }
 
     /// 本地日期变了：到昨天为止的内容归档成昨天的 `.log.gz`，新的一行进新文件。

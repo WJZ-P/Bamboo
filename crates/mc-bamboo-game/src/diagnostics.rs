@@ -82,24 +82,35 @@ thread_local! {
     static IN_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
-/// 装 panic 钩子：panic 时先写一份崩溃报告，再往日志里记一条 ERROR 并把日志刷盘，
-/// 最后照原来的缺省钩子把消息打到 stderr，然后照常展开/退出。用 Once 保证重复调用
-/// 只装一次，不会串成多层钩子。
+/// 装 panic 钩子：panic 时先写一份崩溃报告，再往日志里记一条 ERROR 并把日志刷出去，
+/// 然后照常展开/退出。日志写线程在时那条 ERROR 已经经非阻塞写入器到了控制台，就不再
+/// 调原来的缺省钩子：它同步写 stderr，控制台卡住（Windows 上选中文字）时会把 panic 的
+/// 线程一直卡住，岛的 tick 线程因此会被判死。没有写线程、或者钩子自己 panic 时才交给
+/// 缺省钩子。用 Once 保证重复调用只装一次，不会串成多层钩子。
 ///
 /// Install the panic hook: a panic first writes a crash report, then logs one
-/// ERROR line and flushes the log to disk, and finally calls the previous hook
-/// so the message still reaches stderr, then unwinds/exits as usual. A Once
-/// guards against repeated calls chaining multiple hooks.
+/// ERROR line and flushes the logs, then unwinds/exits as usual. With the log
+/// writer threads present that ERROR line already reaches the console through
+/// the non-blocking writer, so the previous default hook is not called: it
+/// writes stderr synchronously and would hold the panicking thread for as long
+/// as the console is stalled (text selected in a Windows console), getting an
+/// island tick thread declared dead. Only without writer threads, or when the
+/// hook itself panics, does the default hook run. A Once guards against
+/// repeated calls chaining multiple hooks.
 pub fn install_panic_hook() {
     static HOOK: OnceLock<()> = OnceLock::new();
     HOOK.get_or_init(|| {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if !IN_HOOK.replace(true) {
-                report_panic(info);
-                IN_HOOK.set(false);
+            if IN_HOOK.replace(true) {
+                default(info);
+                return;
             }
-            default(info);
+            report_panic(info);
+            IN_HOOK.set(false);
+            if BACKGROUND.get().is_none() {
+                default(info);
+            }
         }));
     });
 }

@@ -382,7 +382,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 
 | 路径 | 内容 |
 |---|---|
-| `logs/latest.log` | 本次运行的日志，行首是本地时间。专用写线程 `bamboo-log-writer` 落盘（控制台另有一条 `bamboo-log-console`），发出日志的线程只把一行拷进内存、往通道投一次，不等磁盘也不等控制台；排队超过 64 MiB 时丢行并记下丢了几行 |
+| `logs/latest.log` | 本次运行的日志，行首是本地时间。专用写线程 `bamboo-log-writer` 落盘（控制台另有一条 `bamboo-log-console`），发出日志的线程只把一行拷进内存、往通道投一次，不等磁盘也不等控制台；排队有上限（文件 64 MiB、控制台 8 MiB、APP 界面 10000 行），哪一路卡住只丢那一路超出的行并记下丢了几行，控制台卡住时文件照样完整 |
 | `logs/YYYY-MM-DD-N.log.gz` | 照官方 Log4j 配置归档：启动时归档上一份（非空的）`latest.log`，开着跨过零点时再滚动一次。日期是被归档内容的那一天（启动时取旧文件的最后修改日期），N 从 1 起取那天没用过的最小号。压缩失败时是不压缩的 `YYYY-MM-DD-N.log` |
 | `crash-reports/crash-YYYY-MM-DD_HH.MM.SS-server.txt` | 任何线程 panic 时的崩溃报告：时间、Bamboo 版本 / 提交号 / Minecraft 版本、线程名、位置、消息、`Backtrace::force_capture()`、每条 tick 线程正在跑的岛和最后跑完的阶段、在线玩家位置（最多一秒前的快照） |
 | `crash-reports/island-dead-YYYY-MM-DD_HH.MM.SS-server.txt` | 岛判死时写一份：判死日志的全部字段，加上所有 tick 线程的信标和在线玩家位置 |
