@@ -676,6 +676,54 @@ mod tests {
         );
     }
 
+    /// `data/` 下的文件没有 `_old` 备份（游戏规则、世界时钟、世界边界、袭击、
+    /// `world_gen_settings.dat` 里的种子）。替换过程里主文件一刻都不能消失：
+    /// 进程在那一刻被杀，重启后读不到文件，这些数据就全部退回默认值。
+    ///
+    /// Files under `data/` have no `_old` backup (game rules, world clocks, the
+    /// world border, raids, the seed in `world_gen_settings.dat`). The main file
+    /// must never be missing during a replace: a process killed at that instant
+    /// restarts with every one of them back at its default.
+    #[test]
+    fn a_replace_without_backup_never_leaves_the_target_missing() {
+        use std::sync::atomic::AtomicBool;
+
+        let tmp = TempDir::new("no-gap");
+        fs::create_dir_all(&tmp.0).unwrap();
+        let target = tmp.0.join("game_rules.dat");
+        fs::write(&target, b"0").unwrap();
+        let done = AtomicBool::new(false);
+        let missing = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| {
+                let mut missing = 0_u32;
+                while !done.load(Ordering::Relaxed) {
+                    // 只数「文件不存在」：别的瞬时错误不是这里要查的窗口。
+                    // Count only "not found"; other transient errors are not this gap.
+                    if let Err(error) = fs::metadata(&target)
+                        && error.kind() == io::ErrorKind::NotFound
+                    {
+                        missing += 1;
+                    }
+                }
+                missing
+            });
+            for round in 0..400_u32 {
+                safe_replace(&target, round.to_string().as_bytes(), None).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            watcher.join().unwrap()
+        });
+        assert_eq!(missing, 0, "the target was missing during a replace");
+        assert_eq!(fs::read(&target).unwrap(), b"399");
+        let leftovers: Vec<_> = fs::read_dir(&tmp.0)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "game_rules.dat")
+            .collect();
+        assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");
+    }
+
     #[test]
     fn layout_uses_the_26_3_paths() {
         let tmp = TempDir::new("layout");
