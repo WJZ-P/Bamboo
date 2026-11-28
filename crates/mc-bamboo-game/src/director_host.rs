@@ -2178,7 +2178,7 @@ impl DirectorHost {
                                 status,
                             }
                         }
-                        Err(error) => TaskResult::BadChunk { error },
+                        Err(error) => TaskResult::DecodeFailed { error },
                     }
                 } else {
                     TaskResult::Decoded {
@@ -2611,7 +2611,7 @@ impl DirectorHost {
                     status,
                 }
             }
-            ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
+            ChunkOutcome::Decoded(Err(error)) => TaskResult::DecodeFailed { error },
             ChunkOutcome::Generated { stage, output } => {
                 // 取消时已经在跑的生成：Director 不再认它，`Forgot` 也可能已经清过
                 // 这个位置，合并进来就再没人清。不合并；重派时纯函数给出同样结果。

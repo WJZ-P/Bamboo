@@ -271,6 +271,12 @@ pub enum TaskResult<C> {
         column: C,
         status: ChunkStatus,
     },
+    /// 存档载荷无法解码，没有可续跑的阶段。
+    ///
+    /// The stored payload could not be decoded; there is no stage to resume.
+    DecodeFailed {
+        error: String,
+    },
     Generated {
         stage: ChunkStatus,
         column: C,
@@ -816,6 +822,7 @@ impl<C: ChunkBundle> Director<C> {
             | TaskResult::Assembled { column }
             | TaskResult::Saved { column, .. } => Some(column),
             TaskResult::Read { .. }
+            | TaskResult::DecodeFailed { .. }
             | TaskResult::BadChunk { .. }
             | TaskResult::SaveFailed { .. }
             | TaskResult::Cancelled => None,
@@ -1228,13 +1235,12 @@ impl<C: ChunkBundle> Director<C> {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
             }
-            TaskResult::Read { bytes: None } => {
-                // 依赖记账可以先标阶段，但读盘未命中时并没有对应的区块内容。
-                // Dependency bookkeeping may advance the stage without a chunk; a disk miss starts fresh.
-                if let Some(record) = self.chunks.get_mut(&pos) {
-                    record.stage = ChunkStatus::Empty;
-                }
-                self.advance_stage(out, pos, generation, None);
+            TaskResult::Read { bytes: None } => self.generate_from_empty(out, pos, generation),
+            TaskResult::DecodeFailed { error } => {
+                out.push(Effect::Warn {
+                    message: format!("bad chunk at ({}, {}): {error}", pos.x, pos.z),
+                });
+                self.generate_from_empty(out, pos, generation);
             }
             TaskResult::Decoded { column, status } => {
                 // 官方 `ChunkStep.apply` 只跑 `persistedStatus` 之后的阶段：
@@ -1272,6 +1278,15 @@ impl<C: ChunkBundle> Director<C> {
             }
             TaskResult::Cancelled => {}
         }
+    }
+
+    fn generate_from_empty(&mut self, out: &mut Vec<Effect<C>>, pos: ChunkPos, generation: u64) {
+        // 依赖记账可以先标阶段，但缺失或损坏的存档没有对应的区块内容。
+        // Dependency bookkeeping may advance the stage without a chunk; missing or bad saves start fresh.
+        if let Some(record) = self.chunks.get_mut(&pos) {
+            record.stage = ChunkStatus::Empty;
+        }
+        self.advance_stage(out, pos, generation, None);
     }
 
     /// 生成流水线的下一步。没有下一阶段就组装（组装完成才交付）。
