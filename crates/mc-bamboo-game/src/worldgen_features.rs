@@ -1000,41 +1000,54 @@ fn cached_feature_run(
     Ok(run)
 }
 
-/// 光引擎只读最终方块，不需要复制地物标记、实体或构造赢家表。
+/// 一次 LIGHT 作业只查询目标 3×3 内的地物中心。
 ///
-/// The light engine only reads final blocks; skip copying feature marks,
-/// entities and constructing winner maps.
-pub(crate) fn feature_block_layers(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-    terrain: &[Vec<u32>],
-) -> Result<Vec<Vec<u32>>, String> {
-    fold_block_layers(cx, cz, terrain, |x, z| cached_feature_run(config, x, z))
+/// One LIGHT job looks up feature runs only for centers inside its 3×3.
+pub(crate) struct LightFeatureRuns([Arc<FeatureRun>; 9]);
+
+impl LightFeatureRuns {
+    pub(crate) fn load(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<Self, String> {
+        let mut runs = std::array::from_fn(|_| None);
+        for (slot, run) in runs.iter_mut().enumerate() {
+            let x = cx + (slot as i32 % 3 - 1);
+            let z = cz + (slot as i32 / 3 - 1);
+            *run = Some(cached_feature_run(config, x, z)?);
+        }
+        Ok(Self(runs.map(Option::unwrap)))
+    }
+
+    /// 对一个视图格，用相对该格的来源下标借用交集内的写。
+    ///
+    /// For one view cell, borrow writes from the intersection, indexed by
+    /// the source slot relative to that cell.
+    pub(crate) fn sources(&self, dest: usize) -> [&[BlockDelta]; 9] {
+        std::array::from_fn(|slot| {
+            let x = dest as i32 % 3 + slot as i32 % 3 - 1;
+            let z = dest as i32 / 3 + slot as i32 / 3 - 1;
+            if (0..3).contains(&x) && (0..3).contains(&z) {
+                self.0[(z * 3 + x) as usize].deltas[8 - slot].as_slice()
+            } else {
+                &[]
+            }
+        })
+    }
 }
 
-fn fold_block_layers(
-    cx: i32,
-    cz: i32,
+/// 来源逆序、来源内正序：最高优先级的来源最后覆盖，组内最后一写仍然赢。
+///
+/// Reverse source priority, not each source's writes: the best source
+/// overwrites last, and its last write to each cell still wins.
+pub(crate) fn fold_light_blocks(
     terrain: &[Vec<u32>],
-    mut source: impl FnMut(i32, i32) -> Result<Arc<FeatureRun>, String>,
-) -> Result<Vec<Vec<u32>>, String> {
+    sources: [&[BlockDelta]; 9],
+) -> Vec<Vec<u32>> {
     let mut slots: [u8; 9] = std::array::from_fn(|slot| slot as u8);
     slots.sort_unstable_by_key(|&slot| feature_source_order(slot));
-    let mut sources = Vec::with_capacity(slots.len());
-    for slot in slots {
-        let dx = i32::from(slot % 3) - 1;
-        let dz = i32::from(slot / 3) - 1;
-        sources.push((slot, source(cx + dx, cz + dz)?));
-    }
-    // 来源逆序、来源内正序：最高优先级的来源最后覆盖，组内最后一写仍然赢。
-    // Reverse source priority, not each source's writes: the best source
-    // overwrites last, and its last write to each cell still wins.
     let mut blocks = terrain.to_vec();
-    for (slot, run) in sources.into_iter().rev() {
-        apply_block_deltas(&mut blocks, &run.deltas[8 - usize::from(slot)]);
+    for slot in slots.into_iter().rev() {
+        apply_block_deltas(&mut blocks, sources[usize::from(slot)]);
     }
-    Ok(blocks)
+    blocks
 }
 
 #[cfg(test)]

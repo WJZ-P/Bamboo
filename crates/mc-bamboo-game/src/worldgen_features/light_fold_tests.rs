@@ -72,23 +72,26 @@ fn outer_feature_spill_changes_light_at_target_edge() {
         let delta = (x, y, 8, state);
         let mut run = empty_run();
         run.deltas[3].push(delta);
-        let outer = Arc::new(run);
-        let empty = Arc::new(empty_run());
-        let mut folded = terrain.clone();
-        folded[5] = fold_block_layers(1, 0, &terrain[5], |x, z| {
-            Ok(Arc::clone(if (x, z) == (2, 0) { &outer } else { &empty }))
-        })
-        .unwrap();
+        let mut runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+        runs.0[5] = Arc::new(run);
+        let mut included = terrain.clone();
+        included[5] = fold_light_blocks(&terrain[5], runs.sources(4));
+        let excluded_runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+        let mut excluded = terrain.clone();
+        excluded[5] = fold_light_blocks(&terrain[5], excluded_runs.sources(5));
         let mut full = terrain.clone();
         set(&mut full[5], delta.0, delta.1, delta.2, delta.3);
-        let exact = light(&folded);
+        let exact = light(&included);
         let old = light(&full);
+        let local = light(&excluded);
         assert_eq!(exact.sky, old.sky, "{name} sky");
         assert_eq!(exact.block, old.block, "{name} block");
+        assert_eq!(local.sky, bare.sky, "{name} local sky");
+        assert_eq!(local.block, bare.block, "{name} local block");
         let (present, omitted) = if sky {
-            (probe(&exact.sky), probe(&bare.sky))
+            (probe(&exact.sky), probe(&local.sky))
         } else {
-            (probe(&exact.block), probe(&bare.block))
+            (probe(&exact.block), probe(&local.block))
         };
         assert_ne!(present, omitted, "{name} omission went undetected");
         println!("{name}: light at (15,63,8) exact={present}, spill omitted={omitted}");
@@ -106,18 +109,37 @@ fn light_fold_preserves_source_precedence_and_last_write() {
     first_neighbor.deltas[8] = vec![(0, MIN_Y, 0, 3), (1, MIN_Y, 0, 4)];
     let mut last_neighbor = empty_run();
     last_neighbor.deltas[0] = vec![(0, MIN_Y, 0, 5), (1, MIN_Y, 0, 6)];
-    let own = Arc::new(own);
-    let first_neighbor = Arc::new(first_neighbor);
-    let last_neighbor = Arc::new(last_neighbor);
-    let empty = Arc::new(empty_run());
-    let result = fold_block_layers(0, 0, &base, |x, z| {
-        Ok(Arc::clone(match (x, z) {
-            (0, 0) => &own,
-            (-1, -1) => &first_neighbor,
-            (1, 1) => &last_neighbor,
-            _ => &empty,
-        }))
-    })
-    .unwrap();
+    let mut runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+    runs.0[0] = Arc::new(first_neighbor);
+    runs.0[4] = Arc::new(own);
+    runs.0[8] = Arc::new(last_neighbor);
+    let result = fold_light_blocks(&base, runs.sources(4));
     assert_eq!((result[0][0], result[0][16]), (2, 4));
+}
+
+#[test]
+fn light_view_uses_only_the_intersection_and_the_correct_destination_slot() {
+    let runs = LightFeatureRuns(std::array::from_fn(|source| {
+        let mut run = empty_run();
+        for (slot, writes) in run.deltas.iter_mut().enumerate() {
+            writes.push((0, MIN_Y, 0, (source * 9 + slot) as u32));
+        }
+        Arc::new(run)
+    }));
+    for dest in 0..9 {
+        let sources = runs.sources(dest);
+        let mut expected = [None; 9];
+        for source in 0..9_i32 {
+            let dx = dest as i32 % 3 - source % 3;
+            let dz = dest as i32 / 3 - source / 3;
+            if dx.abs() <= 1 && dz.abs() <= 1 {
+                let slot = (dz + 1) * 3 + dx + 1;
+                expected[(8 - slot) as usize] = Some((source * 9 + slot) as u32);
+            }
+        }
+        assert_eq!(
+            sources.map(|writes| writes.first().map(|delta| delta.3)),
+            expected
+        );
+    }
 }
