@@ -13,12 +13,12 @@ use mc_bamboo_blocks::{
     archive::{
         block_entity::{create_block_entity, items_tag},
         default_additional,
-        entity::{read_entity_tree, write_entity_tree},
+        entity::{passenger_uids, read_entity_tree, write_entity_tree},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
         resave_additional,
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
-    entity::{ChunkEntities, EntityRow, EntityUid},
+    entity::{ChunkEntities, EntityRow, EntityUid, FIRST_ENTITY_ID},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction};
 use mc_bamboo_data::registries::block_entity_type as kinds;
@@ -33,7 +33,7 @@ use mc_bamboo_protocol::{
 use mc_bamboo_storage::{
     chunk_content::{
         BoundKeys, ChunkContentError, EntityFile, ModeledBlockEntity, merge_block_entities,
-        merge_tick_lists, split_entity_entries,
+        merge_tick_lists,
     },
     chunk_nbt::{self, ChunkEncodeExtra, DecodedChunk as DecodedColumn, field},
 };
@@ -244,19 +244,29 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
         .iter()
         .map(|row| (row.public.uid, row.clone()))
         .collect();
+    // 和 `write_entity_tree` 用同一份乘客名单：它把谁嵌进 `Passengers`，这里就不再把谁
+    // 单独写一行。只认生物载具的话，船上的乘客会嵌一次、单独再写一次，读回来多一只。
+    // The same passenger list `write_entity_tree` nests from: whoever it puts under
+    // `Passengers` is not written as a row again. Looking at mob vehicles only wrote a
+    // boat passenger twice, nested and on its own, and it came back doubled.
     let written_under_vehicle = |row: &EntityRow| {
         row.public.vehicle.is_some_and(|vehicle| {
             by_uid
                 .get(&vehicle)
-                .is_some_and(|parent| match &parent.public.kind {
-                    mc_bamboo_blocks::entity::KindPublic::Mob(mob) => {
-                        mob.passengers.contains(&row.public.uid)
-                    }
-                    _ => false,
-                })
+                .is_some_and(|parent| passenger_uids(&parent.public.kind).contains(&row.public.uid))
         })
     };
     for row in rows {
+        // 官方 `Entity.shouldBeSaved`：已经移除的实体不存；整棵树里恰好一名玩家的根载具
+        // 也不存，它连同别的乘客写在那名玩家存档的 `RootVehicle` 里，区块里再存一份
+        // 就是两份。
+        // Vanilla `Entity.shouldBeSaved`: a removed entity is not saved, and neither is
+        // a root whose tree holds exactly one player. That root and its other
+        // passengers live in the player file's `RootVehicle`; a chunk copy would be a
+        // second one.
+        if row.public.removed || players_in_tree(row, &by_uid, 0) == 1 {
+            continue;
+        }
         if written_under_vehicle(row)
             || matches!(
                 row.public.kind,
@@ -281,6 +291,38 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
         chunk,
         entities: file.encode(),
     })
+}
+
+/// 这棵骑乘树里的玩家数，官方 `Entity.countPlayerPassengers`（连间接乘客一起数）。
+/// 玩家不在实体表里，名单上小于 [`FIRST_ENTITY_ID`] 的就是玩家。只看同一份存档里的行。
+///
+/// Players in this riding tree, vanilla `Entity.countPlayerPassengers` (indirect
+/// passengers included). Players are not entity rows; ids below [`FIRST_ENTITY_ID`] in
+/// a passenger list are players. Only rows of the same save are followed.
+fn players_in_tree(
+    row: &EntityRow,
+    by_uid: &BTreeMap<EntityUid, EntityRow>,
+    depth: usize,
+) -> usize {
+    /// 和 `write_entity_tree` 的嵌套上限一样，坏数据成环也会停。
+    ///
+    /// The nesting limit of `write_entity_tree`, so a corrupt cycle still ends.
+    const MAX_DEPTH: usize = 64;
+    passenger_uids(&row.public.kind)
+        .iter()
+        .map(|&uid| {
+            if uid < FIRST_ENTITY_ID {
+                1
+            } else if depth < MAX_DEPTH {
+                by_uid
+                    .get(&uid)
+                    .filter(|child| child.public.vehicle == Some(row.public.uid))
+                    .map_or(0, |child| players_in_tree(child, by_uid, depth + 1))
+            } else {
+                0
+            }
+        })
+        .sum()
 }
 
 /// 从两份 NBT 组装区块束。`entities` 为 `None` 表示没有实体文件。
@@ -325,23 +367,32 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
             at: "entities".to_owned(),
             message,
         }));
-        let (modeled, unknown) = split_entity_entries(file.entities);
+        // 每一条都交给 blocks 试着读：读得出来的进实体表，`id` 不认识的整条原样保留。
+        // 以前这里先按一张写死的名单筛，名单外的（村民、马、船、矿车……）即使读得出来
+        // 也只当原始数据留着，区块一重新加载它们就从世界里消失了。读坏的也原样保留，
+        // 不丢数据。
+        // Offer every entry to the blocks decoder: what it reads becomes a live entity
+        // and an unknown `id` is preserved verbatim. A fixed allowlist used to filter
+        // first, so everything outside it (villagers, horses, boats, minecarts, ...)
+        // stayed raw even though it could be read, and vanished from the world when
+        // its chunk reloaded. Entries that fail to decode are preserved too.
         let mut next_uid = FIRST_UID;
-        for (index, tag) in modeled.iter().enumerate() {
-            match read_entity_tree(tag, &mut next_uid) {
+        // `EntityFile` 已经按那张名单把条目分成两堆，两堆都要试。
+        // `EntityFile` already split the entries by that list; both halves are tried.
+        let entries = file.entities.into_iter().chain(file.preserved_entities);
+        for (index, tag) in entries.enumerate() {
+            match read_entity_tree(&tag, &mut next_uid) {
                 Ok(Some(tree)) => rows.extend(tree),
-                Ok(None) => problems.push(Problem {
-                    at: format!("entities[{index}]"),
-                    message: "unknown entity id".to_owned(),
-                }),
-                Err(error) => problems.push(Problem {
-                    at: format!("entities[{index}]"),
-                    message: error.0,
-                }),
+                Ok(None) => preserved_entities.push(tag),
+                Err(error) => {
+                    problems.push(Problem {
+                        at: format!("entities[{index}]"),
+                        message: error.0,
+                    });
+                    preserved_entities.push(tag);
+                }
             }
         }
-        preserved_entities.extend(unknown);
-        preserved_entities.extend(file.preserved_entities);
     }
     rows.sort_by_key(|row| row.public.uid);
     parts.entities = ChunkEntities::from_parts(rows, preserved_entities);
