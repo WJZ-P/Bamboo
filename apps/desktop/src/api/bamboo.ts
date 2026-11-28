@@ -23,6 +23,13 @@ export type Forwarding = "off" | "legacy" | "modern";
 /** 新建世界用的世界预设，和官方 `level-type` 的四个注册名一一对应。 */
 export type WorldType = "normal" | "flat" | "largeBiomes" | "amplified";
 
+/**
+ * 日志级别，和 `bamboo.toml` 的 `log_level` 一一对应。
+ *
+ * A log level, matching `log_level` in `bamboo.toml`.
+ */
+export type LogLevelName = "error" | "warn" | "info" | "debug" | "trace";
+
 /** 服务端的全部可调选项。字段和 `src-tauri` 的 `ServerSettings` 一一对应。 */
 export interface ServerSettings {
   /** 服务器目录，只读展示；APP 和命令行版共用这里的两个配置文件。 */
@@ -84,6 +91,27 @@ export interface ServerSettings {
   reclaimsPerTick: number;
   islandThreads: number;
   islands: boolean;
+  /**
+   * 控制台（终端和这个界面）的日志级别，写进 bamboo.toml 的 log_level；RUST_LOG 环境变量优先。
+   *
+   * The console (terminal and this UI) log level, written to log_level in
+   * bamboo.toml; the RUST_LOG environment variable takes priority.
+   */
+  logLevel: LogLevelName;
+  /**
+   * logs/latest.log 的级别，写进 bamboo.toml 的 log_file_level；空串表示和 logLevel 一样。
+   *
+   * The level of logs/latest.log, written to log_file_level in bamboo.toml;
+   * empty means the same as logLevel.
+   */
+  logFileLevel: LogLevelName | "";
+  /**
+   * 追加的 EnvFilter 指令，按模块细调级别，写进 bamboo.toml 的 log_filter。
+   *
+   * Extra EnvFilter directives for per-module levels, written to log_filter
+   * in bamboo.toml.
+   */
+  logFilter: string;
 }
 
 /** 一键性能模式的一组值，字段和 Rust 侧 `PerformancePreset` 一一对应。 */

@@ -61,6 +61,12 @@ export const GROUPS = [
     title: "性能",
     hint: "实体阶段、生物降频、独立寻路阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑；下面的一键按钮只改和生物性能有关的那几项。",
   },
+  {
+    id: "logging",
+    section: "bamboo",
+    title: "日志",
+    hint: "服务端写 logs/latest.log，启动时和每天零点把上一份按日期归档成 .log.gz；panic 和岛判死的报告在 crash-reports 目录。级别缺省 info，文件可以单独设；RUST_LOG 环境变量优先。改完要重启应用才生效。",
+  },
 ] as const;
 
 export type GroupId = (typeof GROUPS)[number]["id"];
@@ -601,6 +607,46 @@ export const FIELDS: readonly SettingField[] = [
     control: "toggle",
     wide: true,
     hint: "默认开启：分区器把相距很远的玩家群拆成各自的岛，各岛并行跑，一个岛过载只拖慢它自己。跨岛的先后、传送和全局命令反馈会比精确模式晚几刻，天气的随机序列和官方不同。关闭 = 整个世界一个岛；关闭并且 tick 线程数设成 0 就是精确模式，和官方逐位一致，所有对拍和探针都显式选它。",
+  },
+  {
+    key: "logLevel",
+    group: "logging",
+    fileKey: "log_level",
+    label: "日志级别",
+    control: "select",
+    options: [
+      { value: "error", label: "ERROR" },
+      { value: "warn", label: "WARN" },
+      { value: "info", label: "INFO" },
+      { value: "debug", label: "DEBUG" },
+      { value: "trace", label: "TRACE" },
+    ],
+    hint: "控制台（这个界面和终端）按这个级别记，缺省 INFO。设成 DEBUG / TRACE 才能看到岛 tick 各阶段、区块交付、Director 回执、存档 IO 的细日志；RUST_LOG 环境变量设了就盖过这里。",
+  },
+  {
+    key: "logFileLevel",
+    group: "logging",
+    fileKey: "log_file_level",
+    label: "文件日志级别",
+    control: "select",
+    options: [
+      { value: "", label: "同日志级别" },
+      { value: "error", label: "ERROR" },
+      { value: "warn", label: "WARN" },
+      { value: "info", label: "INFO" },
+      { value: "debug", label: "DEBUG" },
+      { value: "trace", label: "TRACE" },
+    ],
+    hint: "logs/latest.log 单独的级别，缺省和日志级别一样。想让控制台保持清爽、出问题时文件里又有细节，就把这里设成 DEBUG；TRACE 每刻每个岛都会写好几行，只在排查时短时间打开。",
+  },
+  {
+    key: "logFilter",
+    group: "logging",
+    fileKey: "log_filter",
+    label: "日志过滤",
+    control: "text",
+    wide: true,
+    hint: "追加的 EnvFilter 指令，按模块细调级别，例如 mc_bamboo_game::director_host=trace。和日志级别一起拼成过滤指令；缺省留空，RUST_LOG 环境变量优先。",
   },
 ];
 

@@ -12,6 +12,7 @@ mod connection;
 mod console;
 mod event;
 mod lists;
+pub mod logging;
 mod ops;
 mod players;
 mod server;

@@ -515,10 +515,6 @@ fn update_weathering(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Wea
         let pos = me.block_position();
         let air = blocks.block_state(pos).is_air();
         let roll = blocks.level_random_float();
-        eprintln!(
-            "DBG2 was_oxidized={} air={} roll={} chance={}",
-            was_oxidized, air, roll, TURN_TO_STATUE_CHANCE
-        );
         if air && roll <= TURN_TO_STATUE_CHANCE {
             let pose = me.random.next_int_bounded(4) as u8;
             let facing = Direction::from_yaw(f64::from(me.y_rot));

@@ -446,7 +446,7 @@ fn finish_player(region: &mut Region, id: PlayerId) {
     let kick = flying_tick(player);
     let name = player.name.clone();
     if kick {
-        warn!("{name} was kicked for floating too long!");
+        warn!(player = id.0, pos = ?here, "{name} was kicked for floating too long!");
         region
             .links
             .kick(id, &movement::translated("multiplayer.disconnect.flying"));
@@ -669,7 +669,12 @@ fn apply_change(
     let spectator = player.game_mode == GameMode::Spectator;
     let fail = x_error > MOVED_WRONGLY && !creative && !spectator;
     if fail {
-        warn!("{} moved wrongly!", player.name);
+        warn!(
+            requested = ?change.target,
+            reached = ?end,
+            "{} moved wrongly!",
+            player.name
+        );
     }
     let old_box = movement_box(player);
     // 官方 `level.noCollision(player, oldAABB)` 是方块、实体、边界三样都不碰。
@@ -833,6 +838,7 @@ fn reject_speed(player: &mut Player, change: &Change<'_>, check_speed: bool) -> 
     let limit = f64::from(limit * packets as f32);
     if moved - expected > limit {
         warn!(
+            from = ?player.motion.first_good,
             "{} moved too quickly! {},{},{}",
             player.name, offset.x, offset.y, offset.z
         );

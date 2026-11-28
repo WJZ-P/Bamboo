@@ -771,10 +771,19 @@ impl World {
             slot.debt = 0;
             self.master.profiler.record_island_dropped(id, dropped);
         }
-        if let Some(payload) = panic
-            && self.master.hybrid.panic.is_none()
-        {
-            self.master.hybrid.panic = Some(payload);
+        if let Some(payload) = panic {
+            // 当场记下是哪个岛、哪条线程、什么消息；重新抛出时只剩载荷。
+            // Record which island, which thread and what message right here;
+            // the re-raise only carries the payload.
+            error!(
+                island = id,
+                worker,
+                message = crate::diagnostics::panic_text(payload.as_ref()),
+                "an island panicked during its tick"
+            );
+            if self.master.hybrid.panic.is_none() {
+                self.master.hybrid.panic = Some(payload);
+            }
         }
         Some(id)
     }
@@ -1025,9 +1034,19 @@ impl World {
             }
             let running = began.elapsed();
             if running >= next_report {
+                // 带上每个在跑的派出号和它信标上最后跑完的阶段。
+                // Include each running dispatch and its beacon's last finished phase.
+                let phases: Vec<(u64, Option<&'static str>)> =
+                    self.master.pool.as_ref().map_or_else(Vec::new, |pool| {
+                        pool.slow(Duration::ZERO)
+                            .into_iter()
+                            .map(|(ticket, _, progress)| (ticket, progress.last_phase))
+                            .collect()
+                    });
                 warn!(
                     seconds = running.as_secs(),
                     islands = ?self.islands.away_ids(),
+                    ?phases,
                     "island ticks are still running"
                 );
                 next_report += ISLAND_SLOW_REPORT;

@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use crate::profiler::Phase;
@@ -27,6 +27,15 @@ const TICK_STARTED: u8 = u8::MAX;
 pub(crate) struct Beacon {
     phase: AtomicU8,
     at_nanos: AtomicU64,
+    /// 正在跑的岛的编号加一，0 表示这条线程闲着。只给崩溃报告看。
+    ///
+    /// The running island's id plus one; 0 means the thread is idle. Only read
+    /// by crash reports.
+    island_plus_one: AtomicU64,
+    /// 正在跑的派出号。
+    ///
+    /// The dispatch ticket being run.
+    ticket: AtomicU64,
 }
 
 /// 读出来的进度：最后跑完的一段（`None` 表示这一刻还没跑完任何一段）和距离那次记录
@@ -42,6 +51,18 @@ pub(crate) struct Progress {
 
 thread_local! {
     static CURRENT: RefCell<Option<Arc<Beacon>>> = const { RefCell::new(None) };
+}
+
+/// 全部 tick 线程的信标，供崩溃报告在 panic 钩子里无锁读取。只在装信标时写一次，
+/// 读的时刻用 `try_lock`：拿不到就跳过，绝不为写报告去等锁。
+///
+/// Every tick thread's beacon, for the crash report's panic hook to read without
+/// blocking. Written once per installation; reads use `try_lock` and skip on
+/// contention rather than ever waiting on a lock for a report.
+static REGISTRY: OnceLock<Mutex<Vec<Weak<Beacon>>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<Vec<Weak<Beacon>>> {
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn epoch() -> Instant {
@@ -66,6 +87,44 @@ impl Beacon {
         self.store(TICK_STARTED);
     }
 
+    /// 一刻开跑时调用：同 [`Self::start_tick`]，另外记下跑的是哪个岛、哪个派出号。
+    ///
+    /// Called when a tick starts: [`Self::start_tick`] plus which island and
+    /// which dispatch ticket is running.
+    pub(crate) fn start_tick_of(&self, island: u32, ticket: u64) {
+        self.ticket.store(ticket, Ordering::Relaxed);
+        self.island_plus_one
+            .store(u64::from(island) + 1, Ordering::Relaxed);
+        self.start_tick();
+    }
+
+    /// 一刻跑完（或者 panic 被接住）之后调用：这条线程回到闲着。
+    ///
+    /// Called after a tick ends (or its panic was caught): the thread is idle
+    /// again.
+    pub(crate) fn finish_tick(&self) {
+        self.island_plus_one.store(0, Ordering::Relaxed);
+    }
+
+    /// 给崩溃报告用的一行。
+    ///
+    /// One line for a crash report.
+    fn describe(&self) -> String {
+        let progress = self.progress();
+        let phase = progress
+            .last_phase
+            .unwrap_or("none (before the first phase)");
+        let since = progress.since.as_secs_f64();
+        match self.island_plus_one.load(Ordering::Relaxed) {
+            0 => format!("idle (last tick: last finished phase = {phase}, {since:.3}s ago)"),
+            island => format!(
+                "running island {} (dispatch {}): last finished phase = {phase}, {since:.3}s ago",
+                island - 1,
+                self.ticket.load(Ordering::Relaxed)
+            ),
+        }
+    }
+
     /// 读当前进度。
     ///
     /// Read the current progress.
@@ -80,11 +139,39 @@ impl Beacon {
     }
 }
 
-/// 把 `beacon` 装成当前线程的信标（tick 线程开工时调用一次）。
+/// 把 `beacon` 装成当前线程的信标（tick 线程开工时调用一次），并登记到全局表。
 ///
-/// Install `beacon` as this thread's beacon (once, when a tick thread starts).
+/// Install `beacon` as this thread's beacon (once, when a tick thread starts)
+/// and register it in the global table.
 pub(crate) fn install(beacon: Arc<Beacon>) {
+    if let Ok(mut list) = registry().lock() {
+        list.push(Arc::downgrade(&beacon));
+    }
     CURRENT.with(|current| *current.borrow_mut() = Some(beacon));
+}
+
+/// 全部信标的进度，一行一个，给崩溃报告用。读不到表时返回一行说明，不阻塞。
+///
+/// Every beacon's progress, one line each, for a crash report. Returns a note
+/// line when the table cannot be read; never blocks.
+pub(crate) fn snapshot_lines() -> Vec<String> {
+    let Ok(list) = registry().try_lock() else {
+        return vec!["(beacon registry busy; snapshot unavailable)".to_owned()];
+    };
+    let mut out = Vec::new();
+    for (index, weak) in list.iter().enumerate() {
+        let Some(beacon) = weak.upgrade() else {
+            continue;
+        };
+        out.push(format!("tick thread {index}: {}", beacon.describe()));
+    }
+    if out.is_empty() {
+        out.push(
+            "(no island beacons registered: exact/lockstep mode, or no tick threads yet)"
+                .to_owned(),
+        );
+    }
+    out
 }
 
 /// 当前线程刚跑完 `phase`。没装信标的线程上什么也不做。

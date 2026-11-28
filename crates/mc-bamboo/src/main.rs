@@ -3,29 +3,57 @@
 //! 配置从服务器目录里的 `server.properties` 和 `bamboo.toml` 读；两个文件都缺时
 //! 用默认值写出来。可选的位置参数 `host:port` 只覆盖这一次的监听地址，不写回文件。
 
-use std::{error::Error, future, path::PathBuf};
+use std::{
+    error::Error,
+    future,
+    path::{Path, PathBuf},
+};
 
 use mc_bamboo_server::{
     GAME_VERSION, Server,
-    config_files::{ConfigFiles, load_or_create, log_startup, world_dir},
+    config_files::{ConfigFiles, load_or_create, log_startup, read, world_dir},
+    logging::{self, LogSetup},
 };
 use tokio::net::TcpListener;
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info, warn};
+use tracing_subscriber::prelude::*;
 
 const DEFAULT_HOST: &str = "0.0.0.0";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    let (directory, address_override) = parse_args(std::env::args().skip(1))?;
+    // 先只读看一眼日志级别，把订阅者装起来；随后 load_or_create 再读一次并写回，
+    // 那一次的配置告警这时能被日志收下。
+    // Peek at the log config read-only to install the subscriber; load_or_create
+    // then re-reads and writes back, and its config warnings are captured.
+    let peek = read(&directory).unwrap_or_default();
+    // 守卫活到 main 返回：那时把还排着队的日志行刷到磁盘。
+    // The guard lives until main returns, when queued log lines are flushed.
+    let LogSetup {
+        console_writer,
+        file_writer,
+        console_directive,
+        file_directive,
+        guard: _log_guard,
+    } = logging::setup(&directory, &peek.bamboo);
+    tracing_subscriber::registry()
+        .with(logging::console_layer(console_writer, &console_directive))
+        .with(logging::file_layer(file_writer, &file_directive))
         .init();
 
-    let (directory, address_override) = parse_args(std::env::args().skip(1))?;
-    let files: ConfigFiles = load_or_create(&directory, true)?;
-    log_startup(&directory, &files);
+    // 启动失败的原因也要进日志文件，不只是打到 stderr。
+    // A startup failure goes to the log file too, not only to stderr.
+    let result = run(&directory, address_override).await;
+    if let Err(error) = &result {
+        error!(%error, "Bamboo stopped with an error");
+    }
+    result
+}
+
+async fn run(directory: &Path, address_override: Option<String>) -> Result<(), Box<dyn Error>> {
+    let files: ConfigFiles = load_or_create(directory, true)?;
+    log_startup(directory, &files);
 
     let address = match address_override {
         Some(address) => {
@@ -45,11 +73,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     let listener = TcpListener::bind(&address).await?;
-    let config = files.to_server_config(&directory);
+    let config = files.to_server_config(directory);
     info!(
         "Bamboo is listening on {} for Minecraft {GAME_VERSION}; world directory {}",
         listener.local_addr()?,
-        world_dir(&directory, &files).display()
+        world_dir(directory, &files).display()
     );
 
     Server::new(listener, config)?.run(shutdown_signal()).await;

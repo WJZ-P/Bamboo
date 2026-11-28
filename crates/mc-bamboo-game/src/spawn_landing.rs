@@ -716,6 +716,7 @@ pub(crate) fn finish_pending(region: &mut crate::region::Region) {
             if !ready {
                 warn!(
                     player = id.0,
+                    waited_ticks = pending.waited + 1,
                     "spawn landing timed out; using the search over loaded chunks"
                 );
             }

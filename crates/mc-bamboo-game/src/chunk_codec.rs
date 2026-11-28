@@ -171,7 +171,7 @@ impl ChunkCodec for InlineCodec {
         let mut decoded = chunk_content::decode(pos, &chunk_tag, entities_tag.as_ref())
             .map_err(|e| e.to_string())?;
         for problem in &decoded.problems {
-            warn!(at = %problem.at, message = %problem.message, "chunk decode problem");
+            warn!(chunk = ?pos, at = %problem.at, message = %problem.message, "chunk decode problem");
         }
         if let Some(bytes) = &packed.poi {
             // 官方 `SectionStorage` 读坏了记错误、当成没有数据；`decode_poi` 对

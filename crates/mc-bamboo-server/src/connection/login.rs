@@ -172,7 +172,7 @@ async fn authenticate(
             Ok(None)
         }
         Err(AuthError::Unavailable(error)) => {
-            warn!(%error, "couldn't verify username because servers are unavailable");
+            warn!(%error, username = %name, "couldn't verify username because servers are unavailable");
             connection.refuse_login_translated(AUTHSERVERS_DOWN).await?;
             Ok(None)
         }

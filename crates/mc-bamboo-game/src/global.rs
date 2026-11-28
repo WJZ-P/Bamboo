@@ -684,8 +684,7 @@ impl Global {
         self.server_ticks = self.server_ticks.wrapping_add(1);
     }
 
-    /// 开服以来的刻数；单元测试断言周期相位用。
-    #[cfg(test)]
+    /// 开服以来的刻数。
     pub(crate) fn server_ticks(&self) -> i32 {
         self.server_ticks
     }

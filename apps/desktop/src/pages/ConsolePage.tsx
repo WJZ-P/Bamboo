@@ -7,10 +7,35 @@ import { PerformanceStrip } from "../components/PerformanceStrip";
 import { PixelButton, PixelPanel, PixelSplit, PixelSwitch, SunkenBox } from "../components/pixel";
 import { logStore } from "../state/logStore";
 
-type LevelFilter = "ALL" | "WARN" | "ERROR";
+type LevelFilter = "ALL" | "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
 
-const FILTERS: { id: LevelFilter; label: string; levels: LogLevel[] | null }[] = [
+interface FilterTier {
+  id: LevelFilter;
+  label: string;
+  /** 这一档留下哪些级别；null 是全部。 / The levels this tier keeps; null keeps all. */
+  levels: LogLevel[] | null;
+  /**
+   * 只有服务端实际输出过这些级别之一时才显示这一档；不写就一直显示。
+   * Shown only once the server has actually emitted one of these levels; always shown when absent.
+   */
+  onlyWith?: LogLevel[];
+}
+
+// 「仅 TRACE」「仅 DEBUG」和「信息及以上」三档只在服务端真的输出过 debug / trace 时才出现
+// （日志级别在「设置 → 日志」里调）；缺省 info 下筛选栏和原来一样。
+// The "TRACE only", "DEBUG only" and "INFO and above" tiers appear only once the
+// server has really emitted debug / trace lines (the level is under Settings →
+// Logging); at the default info level the toolbar is what it used to be.
+const FILTERS: FilterTier[] = [
   { id: "ALL", label: "全部", levels: null },
+  { id: "TRACE", label: "仅 TRACE", levels: ["TRACE"], onlyWith: ["TRACE"] },
+  { id: "DEBUG", label: "仅 DEBUG", levels: ["DEBUG"], onlyWith: ["DEBUG"] },
+  {
+    id: "INFO",
+    label: "信息及以上",
+    levels: ["INFO", "WARN", "ERROR"],
+    onlyWith: ["DEBUG", "TRACE"],
+  },
   { id: "WARN", label: "警告及以上", levels: ["WARN", "ERROR"] },
   { id: "ERROR", label: "仅错误", levels: ["ERROR"] },
 ];
@@ -58,6 +83,17 @@ export function ConsolePage() {
     return levels ? lines.filter((line) => levels.includes(line.level)) : lines;
   }, [lines, filter]);
 
+  // 正选着的那一档一直留着，免得日志滚走之后按钮自己消失。
+  // The selected tier always stays, so its button does not vanish when the
+  // lines scroll away.
+  const shownFilters = useMemo(() => {
+    const present = new Set(lines.map((line) => line.level));
+    return FILTERS.filter(
+      ({ id, onlyWith }) =>
+        id === filter || !onlyWith || onlyWith.some((level) => present.has(level)),
+    );
+  }, [lines, filter]);
+
   useLayoutEffect(() => {
     const log = logRef.current;
     if (followTail && log) {
@@ -81,7 +117,7 @@ export function ConsolePage() {
       bottom={
           <Panel>
             <Toolbar>
-              {FILTERS.map(({ id, label }) => (
+              {shownFilters.map(({ id, label }) => (
                 <PixelButton
                   key={id}
                   type="button"

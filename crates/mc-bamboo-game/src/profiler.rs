@@ -1161,6 +1161,10 @@ impl Profiler {
         self.phase_durations[phase as usize] = nanos;
         self.last_lap = now;
         crate::island_beacon::mark(phase);
+        // 惰性字段：缺省不输出；打开 trace 后逐段看到岛这一刻跑完了哪一段。
+        // Lazy field: off by default; at trace this shows each finished phase
+        // of an island tick. The field value is only computed when enabled.
+        tracing::trace!(phase = phase.name(), "island tick phase finished");
     }
 
     /// 从现在起重新计 `lap`，之前这段不归任何阶段。分离驱动的岛在 tick 线程上开跑、

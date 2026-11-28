@@ -162,6 +162,9 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `island_threads` | 整数 | 逻辑核数的一半，夹在 2 到 8 之间 | 岛的 tick 线程数。0 = 齐步（精确模式，岛在世界线程上内联跑，和官方逐位一致）；≥ 1 = 分离（岛的一刻在 tick 线程上跑，和主控并行，区块交付晚一刻）。缺省值在第一次启动时按这台机器算好写进文件。见下面「岛的 tick 线程」 |
 | `islands` | 布尔 | `true` | 多岛：相距很远的玩家群各自一个岛，各岛并行跑。`false` = 整个世界一个岛。见下面「多岛」 |
 | `island_dead_seconds` | 整数 | `30` | 多岛时一个岛的同一刻在 tick 线程上连续跑超过这么多秒就判为死岛（5 到 3600）。见下面「多岛」 |
+| `log_level` | 字符串 | `info` | 控制台（终端和桌面 APP 界面）的日志级别，认 `error` / `warn` / `info` / `debug` / `trace`；别的值回落 `info` 并记警告。见下面「日志和崩溃报告」 |
+| `log_file_level` | 字符串 | ``（空） | `logs/latest.log` 的日志级别，留空表示和 `log_level` 一样；认同样五个级别，别的值回落成空并记警告 |
+| `log_filter` | 字符串 | ``（空） | 追加的 `EnvFilter` 指令，按模块细调级别（例如 `mc_bamboo_game::director_host=trace`）；拼在上面两个级别后面，控制台和文件都生效 |
 
 ### 精确模式 / 性能模式
 
@@ -343,7 +346,9 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - 四份管理名单（`ops.json`、`banned-players.json`、`banned-ips.json`、
   `whitelist.json`）固定在服务器目录里，不单独配置。
 - `BAMBOO_PROFILE=<秒>`（剖析器）和 `BAMBOO_TEST_LOADED=1`（测试走已加载模式）
-  是调试用的环境变量，保持环境变量，不进配置文件。`RUST_LOG` 调日志级别。
+  是调试用的环境变量，保持环境变量，不进配置文件。`log_level` / `log_file_level` /
+  `log_filter` 是 `bamboo.toml` 里的项（见上面表格和「日志和崩溃报告」）；`RUST_LOG`
+  环境变量设了就完全盖过这三项，优先级最高，不写回文件。
 - `BAMBOO_ISLAND_THREADS=<n>`：盖过 `island_threads`，见上面「岛的 tick 线程」。
 - `BAMBOO_ISLANDS=0|1`、`BAMBOO_ISLAND_DEAD_SECONDS=<秒>`：盖过 `islands` /
   `island_dead_seconds`，见上面「多岛」。
@@ -367,6 +372,40 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - 未知键忽略，另记一条日志，不报错。
 - 所有来自文件的数值都不会触发 panic：实体线程数夹在 0..256、区块计算线程数和岛的 tick 线程数夹在 0..64、信箱预算夹在 0..65536、
   心跳夹在 1..29 秒。
+- `log_level` 不在五个级别里、或者不是字符串：回落 `info` 并记警告；`log_file_level` 同理回落成空（跟随
+  `log_level`）；`log_filter` 不是字符串时回落空串。拼成的 EnvFilter 指令里若还有非法的模块指令，
+  `EnvFilter::new` 会按 lossy 规则忽略那一条，不会让服务端启动失败。
+
+## 日志和崩溃报告
+
+命令行版和桌面 APP 都在**服务器目录**里建两个目录，和 `server.properties` / `bamboo.toml` 同级：
+
+| 路径 | 内容 |
+|---|---|
+| `logs/latest.log` | 本次运行的日志，行首是本地时间。专用写线程 `bamboo-log-writer` 落盘（控制台另有一条 `bamboo-log-console`），发出日志的线程只把一行拷进内存、往通道投一次，不等磁盘也不等控制台；排队有上限（文件 64 MiB、控制台 8 MiB、APP 界面 10000 行），哪一路卡住只丢那一路超出的行并记下丢了几行，控制台卡住时文件照样完整 |
+| `logs/YYYY-MM-DD-N.log.gz` | 照官方 Log4j 配置归档：启动时归档上一份（非空的）`latest.log`，开着跨过零点时再滚动一次。日期是被归档内容的那一天（启动时取旧文件的最后修改日期），N 从 1 起取那天没用过的最小号。压缩失败时是不压缩的 `YYYY-MM-DD-N.log` |
+| `crash-reports/crash-YYYY-MM-DD_HH.MM.SS-server.txt` | 任何线程 panic 时的崩溃报告：时间、Bamboo 版本 / 提交号 / Minecraft 版本、线程名、位置、消息、`Backtrace::force_capture()`、每条 tick 线程正在跑的岛和最后跑完的阶段、在线玩家位置（最多一秒前的快照） |
+| `crash-reports/island-dead-YYYY-MM-DD_HH.MM.SS-server.txt` | 岛判死时写一份：判死日志的全部字段，加上所有 tick 线程的信标和在线玩家位置 |
+
+三个键拼成两条 EnvFilter 指令：
+
+- 控制台（终端，以及桌面 APP 的控制台页）：`log_level`，后面拼上 `log_filter`；
+- `logs/latest.log`：`log_file_level`（留空就用 `log_level`），后面拼上 `log_filter`。
+
+`RUST_LOG` 环境变量设了就完全盖过这三项，两边都用它。
+
+**文件和控制台可以分别设级别，缺省相同（都是 `info`）。** 理由：判死、慢岛、panic 的线索
+本来就在 WARN / ERROR 级，并且另有 `crash-reports/` 里的报告，缺省就够用；`debug` 要在
+世界线程上多格式化一批行，不默认打开。排查问题时把 `log_file_level` 设成 `debug`：控制台
+保持清爽，文件里多出岛的拆分 / 合并、每批区块交付和收回、提交给 IO 线程的读写批次、存档
+栅栏落盘。`trace` 再多出每个岛每刻每个阶段、每次派出和交回、每个区块的交付 / Director
+回执 / 读写完成，量很大，只在短时间排查时用。
+
+什么时候把排队的日志刷到磁盘：命令行版 `main` 返回时、桌面 APP 的退出事件里、第二次
+Ctrl+C（或第二次停止）强制退出之前、panic 钩子里。每次最多等 3 秒，磁盘卡死不会把退出也
+卡死。
+
+已知限制见 README「日志和崩溃报告已知限制」。
 
 ## APP 和命令行怎么共用
 

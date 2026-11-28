@@ -1446,6 +1446,39 @@ impl World {
         profiler.record(Metric::Entities, entities as u64);
         profiler.record(Metric::DueScheduledTicks, due as u64);
         profiler.record(Metric::LoadedChunks, loaded as u64);
+        self.publish_player_spots();
+    }
+
+    /// 每秒一次，把停放着的岛上的玩家位置发布给崩溃报告（`diagnostics`）。
+    /// 不在主控手里的岛沿用上一份。
+    ///
+    /// Once a second, publish the player positions of the parked islands for
+    /// crash reports (`diagnostics`). Islands that are away keep their last
+    /// snapshot.
+    fn publish_player_spots(&mut self) {
+        if self.master.global.server_ticks() % 20 != 0 {
+            return;
+        }
+        let parked = self
+            .islands
+            .parked()
+            .map(|island| {
+                let spots = island
+                    .region
+                    .players
+                    .values()
+                    .map(|player| {
+                        let position = player.position();
+                        crate::diagnostics::PlayerSpot {
+                            name: player.name.clone(),
+                            position: [position.x, position.y, position.z],
+                        }
+                    })
+                    .collect();
+                (island.id, spots)
+            })
+            .collect();
+        crate::diagnostics::publish_players(&self.islands.ids(), parked);
     }
 
     /// 每刻一次的压测回调。`None` 时只做一次 `Option` 判断。
@@ -2035,11 +2068,16 @@ impl World {
                 .expect("交出去的岛回到自己的槽位")
                 .put(island);
             if first_panic.is_none() {
-                first_panic = panic;
+                first_panic = panic.map(|payload| (id, worker, payload));
             }
         }
-        if let Some(payload) = first_panic {
-            error!("an island tick thread panicked; taking the world thread's crash path");
+        if let Some((island, worker, payload)) = first_panic {
+            error!(
+                island,
+                worker,
+                message = crate::diagnostics::panic_text(payload.as_ref()),
+                "an island tick thread panicked; taking the world thread's crash path"
+            );
             std::panic::resume_unwind(payload);
         }
         self.master.island_wait = resumed.saturating_duration_since(master_done);
@@ -2087,8 +2125,17 @@ impl World {
             }
             let running = dispatched.elapsed();
             if running >= next_report {
+                // 带上每个在跑的派出号和它信标上最后跑完的阶段：卡住时能直接看出卡在哪一段。
+                // Include each running dispatch and its beacon's last finished
+                // phase, so a stall shows where it is stuck.
+                let phases: Vec<(u64, Option<&'static str>)> = pool
+                    .slow(Duration::ZERO)
+                    .into_iter()
+                    .map(|(ticket, _, progress)| (ticket, progress.last_phase))
+                    .collect();
                 warn!(
                     seconds = running.as_secs(),
+                    ?phases,
                     "the island tick is still running"
                 );
                 next_report += ISLAND_SLOW_REPORT;
@@ -2415,7 +2462,12 @@ impl World {
         let restored = player_bytes.and_then(|bytes| match PlayerData::from_gzip(&bytes) {
             Ok(data) => Some(data),
             Err(error) => {
-                warn!(%error, "could not decode player data; treating as a new player");
+                warn!(
+                    %error,
+                    player = %request.name,
+                    uuid = %uuid_string,
+                    "could not decode player data; treating as a new player"
+                );
                 None
             }
         });
@@ -2783,7 +2835,12 @@ impl World {
             && let Err(error) =
                 crate::save_session::save_player_advancements(root, player.uuid.as_bytes(), &text)
         {
-            tracing::warn!(%error, "could not save player advancements");
+            tracing::warn!(
+                %error,
+                player = %player.name,
+                uuid = %player.uuid,
+                "could not save player advancements"
+            );
         }
     }
 
@@ -2840,7 +2897,11 @@ impl World {
                 if let Err(error) =
                     crate::save_session::save_player_advancements(root, &uuid, &text)
                 {
-                    tracing::warn!(%error, "could not save player advancements");
+                    tracing::warn!(
+                        %error,
+                        uuid = %uuid::Uuid::from_bytes(uuid),
+                        "could not save player advancements"
+                    );
                 }
             }
         }
@@ -4019,7 +4080,7 @@ fn encode_player_save(
     match encode_player_data(&data) {
         Ok(bytes) => Some((player_uuid_string(player.uuid.as_bytes()), bytes)),
         Err(error) => {
-            warn!(%error, "could not encode player data");
+            warn!(%error, player = %player.name, uuid = %player.uuid, "could not encode player data");
             None
         }
     }
