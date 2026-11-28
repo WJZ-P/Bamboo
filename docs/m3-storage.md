@@ -419,7 +419,7 @@ flush 频率把改动攒在内存里批量写。Bamboo 的 Linear 实现同样�
 | `level.dat`、玩家数据 | 临时文件 → 备份成 `*_old` → 删 → rename，失败回滚 | `Util.safeReplaceFile`（10 次重试） |
 | 读 `level.dat` 失败 | 退回 `level.dat_old` | `LevelStorageSource` |
 | 读玩家数据失败 | 退回 `<uuid>.dat_old`；原文件另存成 `<uuid>_corrupted_<日期>.dat`，玩家按新玩家进服 | `PlayerDataStorage.backup` |
-| 区块解压失败、NBT 坏、`DataVersion` 不对 | 当成“没有这个区块”，`warn` 一条带坐标的英文日志，用模板。**不删文件、不覆盖**，等用户处理 | `ChunkMap` 读失败后重新生成 |
+| 区块解压失败、NBT 坏、`DataVersion` 不对 | 当成“没有这个区块”，记录带坐标的 `warn`，从 EMPTY 开始生成（flat 走模板）。恢复步骤不会直接删除或备份坏数据；重生成的块仍可走正常保存 | `ChunkMap.handleChunkLoadFailure` → `createEmptyChunk` |
 | 区域文件头坏 | 坏表项清零（见 6.1），其余区块照常读 | `RegionFile` 构造函数 |
 | 同一个世界被开两次 | `session.lock` 独占锁，拿不到就拒绝启动 | `DirectoryLock` |
 | 存档线程 panic | 和世界线程 panic 同级（R12）：记日志，走关闭流程 | 官方把 IO 异常传回主线程 |
@@ -716,8 +716,9 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    `chunk_worker_threads ≥ 1` 时 `Decode` / `Generate` / `Save` 由 `chunk_jobs::ChunkJob`
    交给常驻计算池，`Assemble` 仍内联、`Read` 仍在 IO 线程（`082a7c9`）。
    Director 的 `Task::Read` 是真正的读盘阶段：任意 `Status` 都解码，
-   非 `full` 把盘上阶段交给 Director 续跑到 `Full`、盘上没有走超平坦模板、
-   读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，
+   非 `full` 把盘上阶段交给 Director 续跑到 `Full`；盘上缺失或载荷读坏都从 EMPTY
+   开始生成（flat 走模板），读坏另记 warn。实体文件与区块一起读齐才交付（D8）。
+   卸载时脏区块序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，
    写盘途中被请求回来拿最新内容；同区块新快照按 `(pos, seq)` 丢旧快照；运行中按官方字节码的节奏保存
    （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却），已加载脏区块用 `BorrowedParts` 只读拍快照、
    不取出盒子也不算完光照。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
@@ -944,7 +945,7 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   Bamboo 的启动扫描同样只认 `.mca` 表项，`RegionFile::read` 按 `EXTERNAL_FLAG`
   转去读 `.mcc`，所以外置区块本来就能被扫到、也能读回；新增回归测试
   `startup_scan_recognizes_external_mcc_chunks` 钉住这一点。`.mcc` 丢了时
-  `has_chunk` 仍为真、读失败走 warn + 模板，和官方一致。
+  `has_chunk` 仍为真、读失败记录 warn 并按缺失区块生成。
 - 非 `full` 的 `Status`：官方 `SerializableChunkData.parse` 读任意 `Status`
   （`ChunkStatus.CODEC`，读不出来当 `EMPTY`），`read` 造 `ProtoChunk` 并
   `setPersistedStatus(status)`；`ChunkStep.apply` 只在 `persistedStatus` 落后于
