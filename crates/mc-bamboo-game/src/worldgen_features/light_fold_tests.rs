@@ -1,10 +1,13 @@
 use mc_bamboo_blocks::state::{BERRIES, BlockState, DOWN};
-use mc_bamboo_core::ChunkPos;
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
+use mc_bamboo_world::chunk::Chunk;
+use mc_bamboo_world::column::{ChunkColumn, ChunkColumnParts};
 use mc_bamboo_world::light::{
     MIN_LIGHT_SECTION,
     generate::{GeneratedLight, generate_light_from_layers},
 };
+use mc_bamboo_world::store::ChunkStore;
 
 use super::*;
 
@@ -21,12 +24,15 @@ fn set(layers: &mut [Vec<u32>], x: i32, y: i32, z: i32, block: u32) {
     apply_block_deltas(layers, &[(x, y, z, block)]);
 }
 
-fn light(layers: &[Vec<Vec<u32>>; 9]) -> GeneratedLight {
-    let columns: Vec<_> = (-1..=1)
+fn light_columns(layers: &[Vec<Vec<u32>>; 9]) -> Vec<(ChunkPos, &[Vec<u32>])> {
+    (-1..=1)
         .flat_map(|z| (-1..=1).map(move |x| ChunkPos::new(x, z)))
         .zip(layers.iter().map(Vec::as_slice))
-        .collect();
-    generate_light_from_layers(ChunkPos::new(0, 0), &columns).unwrap()
+        .collect()
+}
+
+fn light(layers: &[Vec<Vec<u32>>; 9]) -> GeneratedLight {
+    generate_light_from_layers(ChunkPos::new(0, 0), &light_columns(layers)).unwrap()
 }
 
 fn probe(layers: &[Option<mc_bamboo_world::light::DataLayer>]) -> u8 {
@@ -34,8 +40,7 @@ fn probe(layers: &[Option<mc_bamboo_world::light::DataLayer>]) -> u8 {
     layers[index].as_ref().expect("probe layer").get(15, 15, 8)
 }
 
-#[test]
-fn outer_feature_spill_changes_light_at_target_edge() {
+fn spill_tunnel() -> [Vec<Vec<u32>>; 9] {
     let ground: Vec<_> = (MIN_Y..MIN_Y + WORLD_HEIGHT)
         .map(|y| vec![if y <= 64 { blocks::STONE } else { blocks::AIR }; 256])
         .collect();
@@ -48,7 +53,12 @@ fn outer_feature_spill_changes_light_at_target_edge() {
         set(&mut terrain[5], x, 63, 8, blocks::AIR);
     }
     set(&mut terrain[5], 20, 64, 8, blocks::AIR);
+    terrain
+}
 
+#[test]
+fn outer_feature_spill_changes_light_at_target_edge() {
+    let terrain = spill_tunnel();
     let bare = light(&terrain);
     let mut compared = 0;
     for (name, x, y, state, sky) in [
@@ -98,6 +108,59 @@ fn outer_feature_spill_changes_light_at_target_edge() {
         compared += 1;
     }
     println!("spill_fixtures={compared}, exact_raw_layer_diffs=0, omissions_detected={compared}");
+}
+
+fn store_with_local_center(full: &[Vec<Vec<u32>>; 9], local: &GeneratedLight) -> ChunkStore {
+    let columns = light_columns(full);
+    let mut store = ChunkStore::new(Chunk::empty(0));
+    let mut generated = crate::worldgen::generate_chunk(&WorldGenConfig::flat_template(), 0, 0)
+        .expect("flat section metadata");
+    for &(pos, blocks) in &columns {
+        generated.blocks = blocks.to_vec();
+        let column = crate::worldgen::build_region_column(&generated).unwrap();
+        let mut parts = ChunkColumnParts::read_from(column.column());
+        let light = if pos == ChunkPos::new(0, 0) {
+            local.clone()
+        } else {
+            generate_light_from_layers(pos, &columns).unwrap()
+        };
+        parts.light = [light.sky, light.block];
+        parts.light_on = true;
+        store
+            .insert_column(pos, Box::new(ChunkColumn::from_parts(parts).unwrap()))
+            .expect("light is settled before insertion");
+    }
+    store
+}
+
+#[test]
+fn local_spill_light_is_recomputed_when_the_omitted_block_is_edited() {
+    let terrain = spill_tunnel();
+    let local = light(&terrain);
+    let edge = BlockPos::new(15, 63, 8);
+    for (layer, y, state) in [
+        (LightLayer::Block, 63, blocks::LAVA),
+        (LightLayer::Sky, 64, blocks::STONE),
+    ] {
+        let edited = BlockPos::new(20, y, 8);
+        let mut full = terrain.clone();
+        set(&mut full[5], edited.x, edited.y, edited.z, state);
+        let exact = light(&full);
+        let (without, with) = match layer {
+            LightLayer::Block => (probe(&local.block), probe(&exact.block)),
+            LightLayer::Sky => (probe(&local.sky), probe(&exact.sky)),
+        };
+        let mut store = store_with_local_center(&full, &local);
+        assert_ne!(without, with, "{layer:?}: fixture needs stale light");
+        assert_eq!(store.light_value(layer, edge), without);
+        assert!(store.set_block(edited, blocks::AIR));
+        store.finish_light_updates();
+        assert_eq!(store.light_value(layer, edge), without);
+        assert!(store.set_block(edited, state));
+        store.finish_light_updates();
+        assert_eq!(store.light_value(layer, edge), with);
+        println!("layer={layer:?}, edge={edge:?}, local={without}, after_edit={with}");
+    }
 }
 
 #[test]
