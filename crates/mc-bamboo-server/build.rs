@@ -18,6 +18,10 @@ fn main() {
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "unknown".to_owned());
+    // 不写 rerun-if-changed：Cargo 于是按缺省「包内任意文件变动就重跑」，提交号跟着
+    // 这份 crate 每次重编刷新；发布构建里就是编译那一刻的 HEAD。
+    // No rerun-if-changed: Cargo's default reruns the script whenever any file
+    // in the package changes, so the commit refreshes on each rebuild of this
+    // crate; in a release build it is HEAD at compile time.
     println!("cargo:rustc-env=BAMBOO_GIT_COMMIT={commit}");
-    println!("cargo:rerun-if-changed=build.rs");
 }
