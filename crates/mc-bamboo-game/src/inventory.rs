@@ -124,7 +124,14 @@ impl Inventory {
     }
 
     /// 中键选取，返回物品变了的菜单槽位，升序。`blocks-inventory.md` 8.4。
-    fn pick(&mut self, stack: &ItemStack) -> Vec<usize> {
+    ///
+    /// 官方 `tryPickItem`：物品栏里没有这种物品时，只有 `hasInfiniteMaterials()`（创造
+    /// 模式）才 `addAndPickItem` 变一个出来；生存模式什么也不给。
+    ///
+    /// Vanilla `tryPickItem`: when the inventory holds no such stack, only
+    /// `hasInfiniteMaterials()` (creative) conjures one with `addAndPickItem`; survival
+    /// gets nothing.
+    fn pick(&mut self, stack: &ItemStack, infinite_materials: bool) -> Vec<usize> {
         match self.find_slot_matching_item(stack) {
             Some(index) if index < HOTBAR_SIZE => {
                 self.select(index);
@@ -135,7 +142,8 @@ impl Inventory {
                 self.slots.swap(hotbar, menu_slot(index));
                 vec![menu_slot(index), hotbar]
             }
-            None => self.add_and_pick(stack),
+            None if infinite_materials => self.add_and_pick(stack),
+            None => Vec::new(),
         }
     }
 
@@ -897,7 +905,8 @@ pub(crate) fn on_pick_item_from_block(
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
-    let changed = player.inventory.pick(&stack);
+    let infinite_materials = player.game_mode == GameMode::Creative;
+    let changed = player.inventory.pick(&stack, infinite_materials);
     let slot = i32::from(player.inventory.selected);
     region.links.send(id, &SetHeldSlot { slot });
     for slot in changed {
