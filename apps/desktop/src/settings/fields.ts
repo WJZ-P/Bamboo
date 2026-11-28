@@ -646,7 +646,7 @@ export const FIELDS: readonly SettingField[] = [
     label: "日志过滤",
     control: "text",
     wide: true,
-    hint: "追加的 EnvFilter 指令，按模块细调级别，例如 mc_bamboo_game::director=trace。和日志级别一起拼成过滤指令；缺省留空，RUST_LOG 环境变量优先。",
+    hint: "追加的 EnvFilter 指令，按模块细调级别，例如 mc_bamboo_game::director_host=trace。和日志级别一起拼成过滤指令；缺省留空，RUST_LOG 环境变量优先。",
   },
 ];
 

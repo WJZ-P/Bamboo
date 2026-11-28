@@ -386,7 +386,11 @@ fn unpack_with_key(
         });
     }
     if now_millis > time_millis.saturating_add(MESSAGE_EXPIRES_AFTER_MILLIS) {
-        tracing::warn!("received an expired chat message; the client and server clocks may differ");
+        tracing::warn!(
+            sender = %current.sender,
+            age_millis = now_millis - time_millis,
+            "received an expired chat message; the client and server clocks may differ"
+        );
     }
     *link = current.advance();
     Ok(SignedMessage {

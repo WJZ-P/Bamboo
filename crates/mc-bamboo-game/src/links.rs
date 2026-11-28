@@ -25,7 +25,11 @@ pub(crate) const PACKET_ERROR: &str = "disconnect.packetError";
 pub(crate) fn encode_frames<P: ClientboundPacket>(packet: &P) -> Vec<u8> {
     let mut frames = Vec::new();
     if let Err(error) = append_frame(&mut frames, packet) {
-        warn!(%error, "dropping a packet that cannot be encoded");
+        warn!(
+            %error,
+            packet = std::any::type_name::<P>(),
+            "dropping a packet that cannot be encoded"
+        );
     }
     frames
 }

@@ -440,7 +440,7 @@ impl BambooConfig {
                 "# 文件里多记细节，就在这里写 \"debug\" 或 \"trace\"。RUST_LOG 优先。\n",
                 "log_file_level = \"{}\"\n",
                 "\n",
-                "# 追加的 EnvFilter 指令，按模块细调级别，例如 \"mc_bamboo_game::director=trace\"，默认留空。\n",
+                "# 追加的 EnvFilter 指令，按模块细调级别，例如 \"mc_bamboo_game::director_host=trace\"，默认留空。\n",
                 "# 拼在上面两个级别后面，控制台和 logs/latest.log 都生效；RUST_LOG 优先。\n",
                 "log_filter = {}\n",
             ),

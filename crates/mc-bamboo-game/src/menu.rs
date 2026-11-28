@@ -1536,6 +1536,7 @@ pub(crate) fn tick(region: &mut Region) {
             if !valid {
                 warn!(
                     player = id.0,
+                    menu_target = ?region.menus.get(&id).map(|menu| &menu.target),
                     "closing a menu whose block is gone or out of reach"
                 );
                 close_menu(region, id);
@@ -1565,12 +1566,15 @@ pub(crate) fn tick(region: &mut Region) {
         };
         broadcast_changes(region, id, &mut menu);
         let valid = still_valid(region, id, &menu);
-        region.menus.insert(id, menu);
         if !valid {
             warn!(
                 player = id.0,
+                menu_target = ?menu.target,
                 "closing a menu whose block is gone or out of reach"
             );
+        }
+        region.menus.insert(id, menu);
+        if !valid {
             close_menu(region, id);
         }
     }
