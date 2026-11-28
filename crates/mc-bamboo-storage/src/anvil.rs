@@ -459,6 +459,7 @@ impl RegionFile {
             None
         };
         let old = self.offsets[index];
+        let old_timestamp = self.timestamps[index];
         self.offsets[index] = pack_offset(
             u32::try_from(sector).map_err(|_| AnvilError::TooLarge(sector))?,
             count as u32,
@@ -466,7 +467,22 @@ impl RegionFile {
         self.timestamps[index] = timestamp;
         self.write_header()?;
         if let Some(tmp) = commit {
-            fs::rename(tmp, self.external_path(pos))?;
+            if let Err(error) = fs::rename(tmp, self.external_path(pos)) {
+                // 改名失败时新桩不可用：先还原头，再释放新扇区。
+                // A failed rename leaves the new stub unusable; restore the header before freeing it.
+                self.offsets[index] = old;
+                self.timestamps[index] = old_timestamp;
+                if let Err(rollback) = self.write_header() {
+                    // 头状态不确定时保留新旧扇区和暂存载荷。
+                    // Keep both allocations and the temporary payload if the header is uncertain.
+                    return Err(AnvilError::Io(format!(
+                        "external chunk rename failed: {error}; restoring region header failed: {rollback}"
+                    )));
+                }
+                self.sectors.set(sector, count, false);
+                let _ = fs::remove_file(tmp);
+                return Err(error.into());
+            }
         } else if old != 0 {
             let _ = fs::remove_file(self.external_path(pos));
         }
@@ -753,6 +769,55 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
             .collect();
         assert!(leftovers.is_empty(), "暂存文件没有清理");
+    }
+
+    #[test]
+    fn failed_external_commit_preserves_the_previous_inline_chunk() {
+        let dir = TempDir::new("external-commit-failure");
+        let region_pos = RegionPos { x: 0, z: 0 };
+        let mut region = open_region(&dir.0, region_pos, RegionCompression::None).unwrap();
+        let pos = ChunkPos::new(2, 3);
+        let neighbor = ChunkPos::new(3, 3);
+        region.write(pos, Some(b"previous"), 11).unwrap();
+        region.write(neighbor, Some(b"neighbor"), 12).unwrap();
+        let index = offset_index(pos).unwrap();
+        let previous_offset = region.offsets[index];
+        let blocker = dir.0.join("c.2.3.mcc");
+        fs::create_dir(&blocker).unwrap();
+        let large = vec![0x6c; 1 << 20];
+
+        assert!(matches!(
+            region.write(pos, Some(&large), 13),
+            Err(AnvilError::Io(_))
+        ));
+        assert_eq!(
+            region.read(pos, 2 << 20).unwrap().as_deref(),
+            Some(&b"previous"[..])
+        );
+        region.sync().unwrap();
+        drop(region);
+
+        let mut reopened = open_region(&dir.0, region_pos, RegionCompression::None).unwrap();
+        assert_eq!(reopened.offsets[index], previous_offset);
+        assert_eq!(reopened.timestamps[index], 11);
+        assert_eq!(
+            reopened.read(pos, 2 << 20).unwrap().as_deref(),
+            Some(&b"previous"[..])
+        );
+        assert_eq!(
+            reopened.read(neighbor, 2 << 20).unwrap().as_deref(),
+            Some(&b"neighbor"[..])
+        );
+        assert!(!fs::read_dir(&dir.0).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        fs::remove_dir(&blocker).unwrap();
+        reopened.write(pos, Some(&large), 14).unwrap();
+        assert_eq!(reopened.read(pos, 2 << 20), Ok(Some(large)));
     }
 
     #[test]
