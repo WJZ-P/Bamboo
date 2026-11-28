@@ -59,10 +59,7 @@ fn a_bundle_taking_a_crafting_result_consumes_the_ingredients() {
 
     let carried = fixture.menu().carried().clone();
     assert_eq!(bundled(&carried, items::OAK_PLANKS), 4, "木板进了袋子");
-    assert!(
-        station_slot(&fixture, 1).is_empty(),
-        "原木要被这次合成用掉"
-    );
+    assert!(station_slot(&fixture, 1).is_empty(), "原木要被这次合成用掉");
     assert!(station_slot(&fixture, 0).is_empty());
 }
 

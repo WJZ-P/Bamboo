@@ -2544,6 +2544,19 @@ impl Station {
         self.set_by_player(index, stack);
     }
 
+    /// 收纳袋从槽里取物品用的 `Slot.safeTake`：带 `mayPickup`、整堆限制和 `onTake`。
+    ///
+    /// `Slot.safeTake` for a bundle taking from a slot, with `mayPickup`, the
+    /// whole-stack rule and `onTake`.
+    pub(crate) fn safe_take_item(
+        &mut self,
+        index: usize,
+        amount: i32,
+        max_amount: i32,
+    ) -> ItemStack {
+        self.safe_take(index, amount, max_amount)
+    }
+
     pub(crate) fn may_place_item(&self, index: usize, stack: &ItemStack) -> bool {
         self.may_place(index, stack)
     }
