@@ -1228,7 +1228,14 @@ impl<C: ChunkBundle> Director<C> {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
             }
-            TaskResult::Read { bytes: None } => self.advance_stage(out, pos, generation, None),
+            TaskResult::Read { bytes: None } => {
+                // 依赖记账可以先标阶段，但读盘未命中时并没有对应的区块内容。
+                // Dependency bookkeeping may advance the stage without a chunk; a disk miss starts fresh.
+                if let Some(record) = self.chunks.get_mut(&pos) {
+                    record.stage = ChunkStatus::Empty;
+                }
+                self.advance_stage(out, pos, generation, None);
+            }
             TaskResult::Decoded { column, status } => {
                 // 官方 `ChunkStep.apply` 只跑 `persistedStatus` 之后的阶段：
                 // 把记录推进到盘上的阶段，再从下一阶段接着生成；`full` 直接交付。

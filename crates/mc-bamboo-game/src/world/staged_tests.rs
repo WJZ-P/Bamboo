@@ -186,6 +186,14 @@ fn generated_cells_with_seed(
     threads: usize,
     positions: &[ChunkPos],
 ) -> BTreeMap<ChunkPos, ChunkCells> {
+    generated_cells_in_batches(seed, threads, &[positions])
+}
+
+fn generated_cells_in_batches(
+    seed: i64,
+    threads: usize,
+    batches: &[&[ChunkPos]],
+) -> BTreeMap<ChunkPos, ChunkCells> {
     let (_inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         view_distance: 3,
@@ -199,6 +207,21 @@ fn generated_cells_with_seed(
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
+    disable_random_ticks(&mut world);
+    for positions in batches {
+        assert!(
+            positions.iter().all(|&pos| !world.is_chunk_loaded(pos)),
+            "each batch must request new FULL columns"
+        );
+        load_full_batch(&mut world, threads, positions);
+    }
+    collect_generated_cells(
+        &mut world,
+        batches.iter().flat_map(|batch| batch.iter().copied()),
+    )
+}
+
+fn load_full_batch(world: &mut World, threads: usize, positions: &[ChunkPos]) {
     // 在 FULL 档取生成期的逐格基准；升入 BLOCK_TICKING 会消费完工表。
     // Compare the assembled FULL output before promotion consumes its generation marks.
     world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
@@ -228,8 +251,8 @@ fn generated_cells_with_seed(
         quiet = 0;
         if world.master.host.compute_in_pool() > 0 {
             idle_unloaded_ticks = 0;
-            wait_for_compute_progress(&mut world, &mut last_progress, deadline, &context);
-        } else if has_pending_work(&world) {
+            wait_for_compute_progress(world, &mut last_progress, deadline, &context);
+        } else if has_pending_work(world) {
             last_progress = Instant::now();
             idle_unloaded_ticks = 0;
         } else {
@@ -240,10 +263,15 @@ fn generated_cells_with_seed(
             );
         }
     }
+}
 
+fn collect_generated_cells(
+    world: &mut World,
+    positions: impl Iterator<Item = ChunkPos>,
+) -> BTreeMap<ChunkPos, ChunkCells> {
     let capacity = WORLD_HEIGHT as usize * 256;
     let mut out = BTreeMap::new();
-    for &pos in positions {
+    for pos in positions {
         let light_on = world
             .islands
             .region
@@ -280,6 +308,45 @@ fn generated_cells_with_seed(
         out.insert(pos, cells);
     }
     out
+}
+
+#[test]
+fn staged_light_matches_one_shot_when_full_columns_arrive_in_strips() {
+    let strips: Vec<Vec<_>> = (14..=17)
+        .map(|x| (6..=8).map(|z| ChunkPos::new(x, z)).collect())
+        .collect();
+    let positions: Vec<_> = strips.iter().flatten().copied().collect();
+    let batches: Vec<_> = strips.iter().map(Vec::as_slice).collect();
+    let incremental = generated_cells_in_batches(42, 4, &batches);
+    let one_shot = generated_cells_with_seed(42, 4, &positions);
+    for pos in &positions {
+        let a = &one_shot[pos];
+        let b = &incremental[pos];
+        assert!(a.light_on && b.light_on, "{pos:?}: unlit column");
+        assert!(a.blocks.contains(&blocks::DEEPSLATE), "{pos:?}: no terrain");
+        if let Some((cell, (&a, &b))) = a
+            .blocks
+            .iter()
+            .zip(&b.blocks)
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+        {
+            let at = BlockPos::new(
+                pos.x * 16 + (cell % 256 / 16) as i32,
+                MIN_Y + (cell / 256) as i32,
+                pos.z * 16 + (cell % 16) as i32,
+            );
+            panic!("{at:?}: one-shot block {a}, incremental block {b}");
+        }
+        assert!(a.sky == b.sky, "{pos:?}: sky light differs");
+        assert!(a.block == b.block, "{pos:?}: block light differs");
+    }
+    println!(
+        "batches={}, chunks={}, cells_per_layer={}",
+        batches.len(),
+        positions.len(),
+        positions.len() * WORLD_HEIGHT as usize * 256
+    );
 }
 
 /// 验收：1、2、4、8 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
