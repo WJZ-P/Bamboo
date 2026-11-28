@@ -7,10 +7,16 @@ import { PerformanceStrip } from "../components/PerformanceStrip";
 import { PixelButton, PixelPanel, PixelSplit, PixelSwitch, SunkenBox } from "../components/pixel";
 import { logStore } from "../state/logStore";
 
-type LevelFilter = "ALL" | "WARN" | "ERROR";
+type LevelFilter = "ALL" | "DEBUG" | "TRACE" | "WARN" | "ERROR";
 
+// DEBUG / TRACE 两档只筛出服务端实际输出过的这两种级别；服务端没开到 debug / trace
+// 时它们自然是空的（日志级别在「设置 → 日志」里调）。
+// The DEBUG / TRACE tiers keep only those levels the server actually emitted;
+// they are empty unless the server runs at debug / trace (set under Settings).
 const FILTERS: { id: LevelFilter; label: string; levels: LogLevel[] | null }[] = [
   { id: "ALL", label: "全部", levels: null },
+  { id: "DEBUG", label: "DEBUG", levels: ["DEBUG"] },
+  { id: "TRACE", label: "TRACE", levels: ["TRACE"] },
   { id: "WARN", label: "警告及以上", levels: ["WARN", "ERROR"] },
   { id: "ERROR", label: "仅错误", levels: ["ERROR"] },
 ];

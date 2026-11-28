@@ -23,6 +23,9 @@ export type Forwarding = "off" | "legacy" | "modern";
 /** 新建世界用的世界预设，和官方 `level-type` 的四个注册名一一对应。 */
 export type WorldType = "normal" | "flat" | "largeBiomes" | "amplified";
 
+/** 日志级别，和 `bamboo.toml` 的 `log_level` 一一对应。 */
+export type LogLevelName = "error" | "warn" | "info" | "debug" | "trace";
+
 /** 服务端的全部可调选项。字段和 `src-tauri` 的 `ServerSettings` 一一对应。 */
 export interface ServerSettings {
   /** 服务器目录，只读展示；APP 和命令行版共用这里的两个配置文件。 */
@@ -84,6 +87,10 @@ export interface ServerSettings {
   reclaimsPerTick: number;
   islandThreads: number;
   islands: boolean;
+  /** 全局日志级别，写进 bamboo.toml 的 log_level；RUST_LOG 环境变量优先。 */
+  logLevel: LogLevelName;
+  /** 追加的 EnvFilter 指令，按模块细调级别，写进 bamboo.toml 的 log_filter。 */
+  logFilter: string;
 }
 
 /** 一键性能模式的一组值，字段和 Rust 侧 `PerformancePreset` 一一对应。 */

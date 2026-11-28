@@ -14,8 +14,9 @@ mod settings;
 
 use std::sync::Arc;
 
-use tauri::Manager;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use mc_bamboo_server::{config_files::read, logging::LogSetup};
+use tauri::{AppHandle, Manager};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     controller::ServerController,
@@ -25,17 +26,17 @@ use crate::{
 
 fn main() {
     let logs = Arc::new(LogHub::default());
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer())
-        .with(LogLayer::new(Arc::clone(&logs)))
-        .init();
-
     tauri::Builder::default()
         .manage(ServerController::default())
         .manage(Arc::clone(&logs))
         .manage(Arc::new(MetricsHub::default()))
         .setup(|app| {
+            // 服务器目录要等 Tauri 起好才能从 AppHandle 拿到，所以订阅者装在 setup 里。
+            // The server directory needs a live AppHandle, so the subscriber is
+            // installed here in setup rather than at the top of main.
+            let handle = app.handle().clone();
+            let hub = Arc::clone(app.state::<Arc<LogHub>>().inner());
+            setup_logging(&handle, &hub)?;
             log_bridge::spawn_forwarder(app.handle().clone(), app.state::<Arc<LogHub>>().inner());
             metrics::spawn_sampler(app.handle().clone(), app.state::<Arc<MetricsHub>>().inner());
             Ok(())
@@ -54,4 +55,34 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
+}
+
+/// 装好三层订阅者：控制台、logs/latest.log、送到界面的 LogLayer，三层同一份级别。
+/// 和命令行版共用 `mc-bamboo-server::logging` 的文件写入器和过滤指令。
+///
+/// Install the three layers: console, logs/latest.log, and the LogLayer feeding
+/// the UI, all with the same level. The file writer and filter directive come
+/// from `mc-bamboo-server::logging`, shared with the CLI.
+fn setup_logging(handle: &AppHandle, hub: &Arc<LogHub>) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = settings::server_directory(handle).map_err(std::io::Error::other)?;
+    let files = read(&directory).unwrap_or_default();
+    let LogSetup {
+        file_writer,
+        directive,
+    } = mc_bamboo_server::logging::setup(
+        &directory,
+        &files.bamboo.log_level,
+        &files.bamboo.log_filter,
+    );
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(EnvFilter::new(&directive)))
+        .with(
+            fmt::layer()
+                .with_writer(file_writer)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new(&directive)),
+        )
+        .with(LogLayer::new(Arc::clone(hub)).with_filter(EnvFilter::new(&directive)))
+        .init();
+    Ok(())
 }

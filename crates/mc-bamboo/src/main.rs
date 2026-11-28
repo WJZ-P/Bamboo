@@ -7,23 +7,41 @@ use std::{error::Error, future, path::PathBuf};
 
 use mc_bamboo_server::{
     GAME_VERSION, Server,
-    config_files::{ConfigFiles, load_or_create, log_startup, world_dir},
+    config_files::{ConfigFiles, load_or_create, log_startup, read, world_dir},
+    logging::LogSetup,
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 const DEFAULT_HOST: &str = "0.0.0.0";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    let (directory, address_override) = parse_args(std::env::args().skip(1))?;
+    // 先只读看一眼日志级别，把订阅者装起来；随后 load_or_create 再读一次并写回，
+    // 那一次的配置告警这时能被日志收下。
+    // Peek at the log config read-only to install the subscriber; load_or_create
+    // then re-reads and writes back, and its config warnings are captured.
+    let peek = read(&directory).unwrap_or_default();
+    let LogSetup {
+        file_writer,
+        directive,
+    } = mc_bamboo_server::logging::setup(
+        &directory,
+        &peek.bamboo.log_level,
+        &peek.bamboo.log_filter,
+    );
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(EnvFilter::new(&directive)))
+        .with(
+            fmt::layer()
+                .with_writer(file_writer)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new(&directive)),
         )
         .init();
 
-    let (directory, address_override) = parse_args(std::env::args().skip(1))?;
     let files: ConfigFiles = load_or_create(&directory, true)?;
     log_startup(&directory, &files);
 
