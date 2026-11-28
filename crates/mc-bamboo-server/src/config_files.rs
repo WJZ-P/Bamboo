@@ -34,6 +34,11 @@ pub const PROPERTIES_FILE: &str = "server.properties";
 /// Bamboo 自己的配置文件的文件名。
 pub const BAMBOO_FILE: &str = "bamboo.toml";
 
+/// `log_level` 认的五个级别；其它值回落到 `info`。
+///
+/// The five levels `log_level` accepts; anything else falls back to `info`.
+const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+
 /// 官方 26.3 `DedicatedServerProperties` 构造函数里的全部键和默认值，按官方第一次
 /// 启动时 `Properties.store` 的顺序排列。管理服务器的密钥是启动时随机生成的，
 /// 这里留空（Bamboo 不实现管理服务器，空值写回时等价于官方的空密钥）。
@@ -160,6 +165,8 @@ const BAMBOO_KEYS: &[&str] = &[
     "island_threads",
     "islands",
     "island_dead_seconds",
+    "log_level",
+    "log_filter",
 ];
 
 /// Bamboo 自己的配置项。每一项都对应 [`ServerConfig`] 里的一个字段。
@@ -248,6 +255,16 @@ pub struct BambooConfig {
     /// s). `BAMBOO_ISLAND_DEAD_SECONDS` overrides it at run time and is never
     /// written back to the file.
     pub island_dead_timeout: Duration,
+    /// 全局日志级别（error/warn/info/debug/trace），缺省 info。`RUST_LOG` 优先。
+    ///
+    /// Global log level (error/warn/info/debug/trace), default info.
+    /// `RUST_LOG` takes priority.
+    pub log_level: String,
+    /// 追加到级别上的 `EnvFilter` 指令（按模块细调），缺省空。
+    ///
+    /// Extra `EnvFilter` directives appended to the level (per-module tuning),
+    /// default empty.
+    pub log_filter: String,
 }
 
 impl Default for BambooConfig {
@@ -287,6 +304,8 @@ impl Default for BambooConfig {
             // The file default ignores the environment for the same reason.
             islands: DEFAULT_ISLANDS,
             island_dead_timeout: Duration::from_secs(DEFAULT_ISLAND_DEAD_SECONDS),
+            log_level: "info".to_owned(),
+            log_filter: String::new(),
         }
     }
 }
@@ -405,6 +424,14 @@ impl BambooConfig {
                 "# 多岛时一个岛卡死多久判为死岛，单位秒，默认 30（5 到 3600）：它上面的玩家被断开，\n",
                 "# 它的区块从上次存盘重新加载，之后的改动丢失。只在 islands = true 时有用。\n",
                 "island_dead_seconds = {}\n",
+                "\n",
+                "# 全局日志级别：error / warn / info / debug / trace，默认 info。\n",
+                "# RUST_LOG 环境变量设了就盖过这里；改完要重启服务端才生效。\n",
+                "log_level = \"{}\"\n",
+                "\n",
+                "# 追加的 EnvFilter 指令，按模块细调级别，例如 \"mc_bamboo_game::director=trace\"，默认留空。\n",
+                "# 和 log_level 一起拼成过滤指令，控制台和 logs/latest.log 用同一份；RUST_LOG 优先。\n",
+                "log_filter = {}\n",
             ),
             self.pre_play_timeout.as_secs(),
             self.max_pre_play_connections,
@@ -436,6 +463,8 @@ impl BambooConfig {
             self.island_threads,
             self.islands,
             self.island_dead_timeout.as_secs(),
+            self.log_level,
+            toml_string(&self.log_filter),
         )
     }
 
@@ -599,6 +628,8 @@ impl BambooConfig {
                 MIN_ISLAND_DEAD_SECONDS as usize,
                 MAX_ISLAND_DEAD_SECONDS as usize,
             ) as u64),
+            log_level: read_log_level(table, file),
+            log_filter: string(table, "log_filter", file, ""),
         }
     }
 }
@@ -631,6 +662,19 @@ fn string(table: &Table, key: &str, file: &Path, default: &str) -> String {
             default.to_owned()
         }
     }
+}
+
+/// `log_level` 只认五个级别，别的（含拼错）回落到 info 并记一条警告。
+///
+/// `log_level` accepts only the five levels; anything else (including a typo)
+/// falls back to info with a warning.
+fn read_log_level(table: &Table, file: &Path) -> String {
+    let value = string(table, "log_level", file, "info");
+    if LOG_LEVELS.contains(&value.as_str()) {
+        return value;
+    }
+    warn!(key = "log_level", original = %value, file = %file.display(), used = "info", "invalid Bamboo config value, using default");
+    "info".to_owned()
 }
 
 fn boolean(table: &Table, key: &str, file: &Path, default: bool) -> bool {
@@ -1340,6 +1384,12 @@ impl ConfigFiles {
         if !self.bamboo.forwarding_secret.is_empty() {
             out.push("forwarding_secret=已设置".to_owned());
         }
+        if self.bamboo.log_level != defaults.bamboo.log_level {
+            out.push(format!("log_level={}", self.bamboo.log_level));
+        }
+        if !self.bamboo.log_filter.is_empty() {
+            out.push(format!("log_filter={}", self.bamboo.log_filter));
+        }
         out
     }
 
@@ -1747,6 +1797,46 @@ mod tests {
                 "{bad} 回落到缺省"
             );
         }
+    }
+
+    /// 日志级别和过滤指令写进文件、读回来；拼错的级别回落到 info。
+    ///
+    /// The log level and filter round-trip through the file; a misspelled level
+    /// falls back to info.
+    #[test]
+    fn log_config_round_trips_and_rejects_an_unknown_level() {
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        assert_eq!(files.bamboo.log_level, "info");
+        assert!(files.bamboo.log_filter.is_empty());
+        files.bamboo.log_level = "debug".to_owned();
+        files.bamboo.log_filter = "mc_bamboo_game::director=trace".to_owned();
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert_eq!(loaded.bamboo.log_level, "debug");
+        assert_eq!(
+            loaded.bamboo.log_filter,
+            "mc_bamboo_game::director=trace"
+        );
+        assert!(
+            loaded
+                .non_defaults()
+                .contains(&"log_level=debug".to_owned())
+        );
+        assert!(
+            loaded
+                .non_defaults()
+                .iter()
+                .any(|line| line.starts_with("log_filter="))
+        );
+        fs::write(
+            dir.path().join(BAMBOO_FILE),
+            "log_level = \"verbose\"\nlog_filter = 3\n",
+        )
+        .unwrap();
+        let bad = read(dir.path()).unwrap();
+        assert_eq!(bad.bamboo.log_level, "info");
+        assert!(bad.bamboo.log_filter.is_empty());
     }
 
     #[test]
