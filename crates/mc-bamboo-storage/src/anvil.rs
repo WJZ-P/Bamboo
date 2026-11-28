@@ -360,8 +360,14 @@ impl RegionFile {
             File::open(self.external_path(pos))
                 .map_err(|_| AnvilError::MissingExternal)?
                 .read_to_end(&mut external)?;
-            // 官方 `.mcc` 里前 5 字节是桩，剩下的是压缩后的 NBT。
-            let body = external.get(CHUNK_HEADER..).ok_or(AnvilError::Truncated)?;
+            // 官方把桩留在 .mca；早期 Bamboo 会在 .mcc 里也写一遍，仍允许读回。
+            // Vanilla keeps the stub in the .mca; older Bamboo duplicated it in the .mcc.
+            let body = external
+                .strip_prefix(&[0, 0, 0, 1, id])
+                .unwrap_or(&external);
+            if body.is_empty() {
+                return Err(AnvilError::Truncated);
+            }
             return compression.decompress(body, limit).map(Some);
         }
         let compression = RegionCompression::from_id(id)?;
@@ -412,10 +418,12 @@ impl RegionFile {
         } else {
             self.compression.id()
         };
-        let mut body = Vec::with_capacity(CHUNK_HEADER + compressed.len());
+        let mut body = Vec::with_capacity(if external { CHUNK_HEADER } else { record_len });
         body.extend_from_slice(&length.to_be_bytes());
         body.push(id);
-        body.extend_from_slice(&compressed);
+        if !external {
+            body.extend_from_slice(&compressed);
+        }
         let count = if external {
             1
         } else {
@@ -438,13 +446,10 @@ impl RegionFile {
             pos.z
         ));
         let commit = if external {
-            let mut stub = vec![0u8; CHUNK_HEADER];
-            stub[..4].copy_from_slice(&1i32.to_be_bytes());
-            stub[4] = id;
-            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &stub)?;
+            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &body)?;
             {
                 let mut file = File::create(&tmp_path)?;
-                file.write_all(&body)?;
+                file.write_all(&compressed)?;
                 file.sync_all()?;
             }
             // 先不改名：等头写完再提交，头写到一半断电时旧的 `.mcc` 还在。
@@ -454,6 +459,7 @@ impl RegionFile {
             None
         };
         let old = self.offsets[index];
+        let old_timestamp = self.timestamps[index];
         self.offsets[index] = pack_offset(
             u32::try_from(sector).map_err(|_| AnvilError::TooLarge(sector))?,
             count as u32,
@@ -461,7 +467,22 @@ impl RegionFile {
         self.timestamps[index] = timestamp;
         self.write_header()?;
         if let Some(tmp) = commit {
-            fs::rename(tmp, self.external_path(pos))?;
+            if let Err(error) = fs::rename(tmp, self.external_path(pos)) {
+                // 改名失败时新桩不可用：先还原头，再释放新扇区。
+                // A failed rename leaves the new stub unusable; restore the header before freeing it.
+                self.offsets[index] = old;
+                self.timestamps[index] = old_timestamp;
+                if let Err(rollback) = self.write_header() {
+                    // 头状态不确定时保留新旧扇区和暂存载荷。
+                    // Keep both allocations and the temporary payload if the header is uncertain.
+                    return Err(AnvilError::Io(format!(
+                        "external chunk rename failed: {error}; restoring region header failed: {rollback}"
+                    )));
+                }
+                self.sectors.set(sector, count, false);
+                let _ = fs::remove_file(tmp);
+                return Err(error.into());
+            }
         } else if old != 0 {
             let _ = fs::remove_file(self.external_path(pos));
         }
@@ -711,6 +732,11 @@ mod tests {
         let external = dir.0.join("c.5.6.mcc");
         assert!(external.exists(), ".mcc 文件存在");
         assert_eq!(sector_count(region.offsets[5 + 6 * 32]), 1, "只留 5 字节桩");
+        assert_eq!(fs::read(&external).unwrap(), data);
+        assert_eq!(region.read(pos, 1 << 24), Ok(Some(data.clone())));
+        let mut legacy = vec![0, 0, 0, 1, RegionCompression::None.id() | EXTERNAL_FLAG];
+        legacy.extend_from_slice(&data);
+        fs::write(&external, legacy).unwrap();
         assert_eq!(region.read(pos, 1 << 24), Ok(Some(data)));
         region.write(pos, None, 8).expect("删除");
         assert!(!external.exists(), "删除时 .mcc 也删掉");
@@ -743,6 +769,55 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
             .collect();
         assert!(leftovers.is_empty(), "暂存文件没有清理");
+    }
+
+    #[test]
+    fn failed_external_commit_preserves_the_previous_inline_chunk() {
+        let dir = TempDir::new("external-commit-failure");
+        let region_pos = RegionPos { x: 0, z: 0 };
+        let mut region = open_region(&dir.0, region_pos, RegionCompression::None).unwrap();
+        let pos = ChunkPos::new(2, 3);
+        let neighbor = ChunkPos::new(3, 3);
+        region.write(pos, Some(b"previous"), 11).unwrap();
+        region.write(neighbor, Some(b"neighbor"), 12).unwrap();
+        let index = offset_index(pos).unwrap();
+        let previous_offset = region.offsets[index];
+        let blocker = dir.0.join("c.2.3.mcc");
+        fs::create_dir(&blocker).unwrap();
+        let large = vec![0x6c; 1 << 20];
+
+        assert!(matches!(
+            region.write(pos, Some(&large), 13),
+            Err(AnvilError::Io(_))
+        ));
+        assert_eq!(
+            region.read(pos, 2 << 20).unwrap().as_deref(),
+            Some(&b"previous"[..])
+        );
+        region.sync().unwrap();
+        drop(region);
+
+        let mut reopened = open_region(&dir.0, region_pos, RegionCompression::None).unwrap();
+        assert_eq!(reopened.offsets[index], previous_offset);
+        assert_eq!(reopened.timestamps[index], 11);
+        assert_eq!(
+            reopened.read(pos, 2 << 20).unwrap().as_deref(),
+            Some(&b"previous"[..])
+        );
+        assert_eq!(
+            reopened.read(neighbor, 2 << 20).unwrap().as_deref(),
+            Some(&b"neighbor"[..])
+        );
+        assert!(!fs::read_dir(&dir.0).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        fs::remove_dir(&blocker).unwrap();
+        reopened.write(pos, Some(&large), 14).unwrap();
+        assert_eq!(reopened.read(pos, 2 << 20), Ok(Some(large)));
     }
 
     #[test]

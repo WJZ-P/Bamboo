@@ -1,10 +1,13 @@
 use mc_bamboo_blocks::state::{BERRIES, BlockState, DOWN};
-use mc_bamboo_core::ChunkPos;
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
+use mc_bamboo_world::chunk::Chunk;
+use mc_bamboo_world::column::{ChunkColumn, ChunkColumnParts};
 use mc_bamboo_world::light::{
     MIN_LIGHT_SECTION,
     generate::{GeneratedLight, generate_light_from_layers},
 };
+use mc_bamboo_world::store::ChunkStore;
 
 use super::*;
 
@@ -21,12 +24,15 @@ fn set(layers: &mut [Vec<u32>], x: i32, y: i32, z: i32, block: u32) {
     apply_block_deltas(layers, &[(x, y, z, block)]);
 }
 
-fn light(layers: &[Vec<Vec<u32>>; 9]) -> GeneratedLight {
-    let columns: Vec<_> = (-1..=1)
+fn light_columns(layers: &[Vec<Vec<u32>>; 9]) -> Vec<(ChunkPos, &[Vec<u32>])> {
+    (-1..=1)
         .flat_map(|z| (-1..=1).map(move |x| ChunkPos::new(x, z)))
         .zip(layers.iter().map(Vec::as_slice))
-        .collect();
-    generate_light_from_layers(ChunkPos::new(0, 0), &columns).unwrap()
+        .collect()
+}
+
+fn light(layers: &[Vec<Vec<u32>>; 9]) -> GeneratedLight {
+    generate_light_from_layers(ChunkPos::new(0, 0), &light_columns(layers)).unwrap()
 }
 
 fn probe(layers: &[Option<mc_bamboo_world::light::DataLayer>]) -> u8 {
@@ -34,8 +40,7 @@ fn probe(layers: &[Option<mc_bamboo_world::light::DataLayer>]) -> u8 {
     layers[index].as_ref().expect("probe layer").get(15, 15, 8)
 }
 
-#[test]
-fn outer_feature_spill_changes_light_at_target_edge() {
+fn spill_tunnel() -> [Vec<Vec<u32>>; 9] {
     let ground: Vec<_> = (MIN_Y..MIN_Y + WORLD_HEIGHT)
         .map(|y| vec![if y <= 64 { blocks::STONE } else { blocks::AIR }; 256])
         .collect();
@@ -48,7 +53,12 @@ fn outer_feature_spill_changes_light_at_target_edge() {
         set(&mut terrain[5], x, 63, 8, blocks::AIR);
     }
     set(&mut terrain[5], 20, 64, 8, blocks::AIR);
+    terrain
+}
 
+#[test]
+fn outer_feature_spill_changes_light_at_target_edge() {
+    let terrain = spill_tunnel();
     let bare = light(&terrain);
     let mut compared = 0;
     for (name, x, y, state, sky) in [
@@ -72,29 +82,85 @@ fn outer_feature_spill_changes_light_at_target_edge() {
         let delta = (x, y, 8, state);
         let mut run = empty_run();
         run.deltas[3].push(delta);
-        let outer = Arc::new(run);
-        let empty = Arc::new(empty_run());
-        let mut folded = terrain.clone();
-        folded[5] = fold_block_layers(1, 0, &terrain[5], |x, z| {
-            Ok(Arc::clone(if (x, z) == (2, 0) { &outer } else { &empty }))
-        })
-        .unwrap();
+        let mut runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+        runs.0[5] = Arc::new(run);
+        let mut included = terrain.clone();
+        included[5] = fold_light_blocks(&terrain[5], runs.sources(4));
+        let excluded_runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+        let mut excluded = terrain.clone();
+        excluded[5] = fold_light_blocks(&terrain[5], excluded_runs.sources(5));
         let mut full = terrain.clone();
         set(&mut full[5], delta.0, delta.1, delta.2, delta.3);
-        let exact = light(&folded);
+        let exact = light(&included);
         let old = light(&full);
+        let local = light(&excluded);
         assert_eq!(exact.sky, old.sky, "{name} sky");
         assert_eq!(exact.block, old.block, "{name} block");
+        assert_eq!(local.sky, bare.sky, "{name} local sky");
+        assert_eq!(local.block, bare.block, "{name} local block");
         let (present, omitted) = if sky {
-            (probe(&exact.sky), probe(&bare.sky))
+            (probe(&exact.sky), probe(&local.sky))
         } else {
-            (probe(&exact.block), probe(&bare.block))
+            (probe(&exact.block), probe(&local.block))
         };
         assert_ne!(present, omitted, "{name} omission went undetected");
         println!("{name}: light at (15,63,8) exact={present}, spill omitted={omitted}");
         compared += 1;
     }
     println!("spill_fixtures={compared}, exact_raw_layer_diffs=0, omissions_detected={compared}");
+}
+
+fn store_with_local_center(full: &[Vec<Vec<u32>>; 9], local: &GeneratedLight) -> ChunkStore {
+    let columns = light_columns(full);
+    let mut store = ChunkStore::new(Chunk::empty(0));
+    let mut generated = crate::worldgen::generate_chunk(&WorldGenConfig::flat_template(), 0, 0)
+        .expect("flat section metadata");
+    for &(pos, blocks) in &columns {
+        generated.blocks = blocks.to_vec();
+        let column = crate::worldgen::build_region_column(&generated).unwrap();
+        let mut parts = ChunkColumnParts::read_from(column.column());
+        let light = if pos == ChunkPos::new(0, 0) {
+            local.clone()
+        } else {
+            generate_light_from_layers(pos, &columns).unwrap()
+        };
+        parts.light = [light.sky, light.block];
+        parts.light_on = true;
+        store
+            .insert_column(pos, Box::new(ChunkColumn::from_parts(parts).unwrap()))
+            .expect("light is settled before insertion");
+    }
+    store
+}
+
+#[test]
+fn local_spill_light_is_recomputed_when_the_omitted_block_is_edited() {
+    let terrain = spill_tunnel();
+    let local = light(&terrain);
+    let edge = BlockPos::new(15, 63, 8);
+    for (layer, y, state) in [
+        (LightLayer::Block, 63, blocks::LAVA),
+        (LightLayer::Sky, 64, blocks::STONE),
+    ] {
+        let edited = BlockPos::new(20, y, 8);
+        let mut full = terrain.clone();
+        set(&mut full[5], edited.x, edited.y, edited.z, state);
+        let exact = light(&full);
+        let (without, with) = match layer {
+            LightLayer::Block => (probe(&local.block), probe(&exact.block)),
+            LightLayer::Sky => (probe(&local.sky), probe(&exact.sky)),
+        };
+        let mut store = store_with_local_center(&full, &local);
+        assert_ne!(without, with, "{layer:?}: fixture needs stale light");
+        assert_eq!(store.light_value(layer, edge), without);
+        assert!(store.set_block(edited, blocks::AIR));
+        store.finish_light_updates();
+        assert_eq!(store.light_value(layer, edge), without);
+        assert!(store.set_block(edited, state));
+        store.finish_light_updates();
+        assert_eq!(store.light_value(layer, edge), with);
+        println!("layer={layer:?}, edge={edge:?}, local={without}, after_edit={with}");
+    }
 }
 
 #[test]
@@ -106,18 +172,37 @@ fn light_fold_preserves_source_precedence_and_last_write() {
     first_neighbor.deltas[8] = vec![(0, MIN_Y, 0, 3), (1, MIN_Y, 0, 4)];
     let mut last_neighbor = empty_run();
     last_neighbor.deltas[0] = vec![(0, MIN_Y, 0, 5), (1, MIN_Y, 0, 6)];
-    let own = Arc::new(own);
-    let first_neighbor = Arc::new(first_neighbor);
-    let last_neighbor = Arc::new(last_neighbor);
-    let empty = Arc::new(empty_run());
-    let result = fold_block_layers(0, 0, &base, |x, z| {
-        Ok(Arc::clone(match (x, z) {
-            (0, 0) => &own,
-            (-1, -1) => &first_neighbor,
-            (1, 1) => &last_neighbor,
-            _ => &empty,
-        }))
-    })
-    .unwrap();
+    let mut runs = LightFeatureRuns(std::array::from_fn(|_| Arc::new(empty_run())));
+    runs.0[0] = Arc::new(first_neighbor);
+    runs.0[4] = Arc::new(own);
+    runs.0[8] = Arc::new(last_neighbor);
+    let result = fold_light_blocks(&base, runs.sources(4));
     assert_eq!((result[0][0], result[0][16]), (2, 4));
+}
+
+#[test]
+fn light_view_uses_only_the_intersection_and_the_correct_destination_slot() {
+    let runs = LightFeatureRuns(std::array::from_fn(|source| {
+        let mut run = empty_run();
+        for (slot, writes) in run.deltas.iter_mut().enumerate() {
+            writes.push((0, MIN_Y, 0, (source * 9 + slot) as u32));
+        }
+        Arc::new(run)
+    }));
+    for dest in 0..9 {
+        let sources = runs.sources(dest);
+        let mut expected = [None; 9];
+        for source in 0..9_i32 {
+            let dx = dest as i32 % 3 - source % 3;
+            let dz = dest as i32 / 3 - source / 3;
+            if dx.abs() <= 1 && dz.abs() <= 1 {
+                let slot = (dz + 1) * 3 + dx + 1;
+                expected[(8 - slot) as usize] = Some((source * 9 + slot) as u32);
+            }
+        }
+        assert_eq!(
+            sources.map(|writes| writes.first().map(|delta| delta.3)),
+            expected
+        );
+    }
 }

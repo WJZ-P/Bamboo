@@ -664,8 +664,8 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 邻居快照是干净 CARVERS 地形，`WorldGenRegion` 读的可能是邻居更靠后阶段的内容、后跑的
 中心也看得到先跑中心的写。`feature-merge` 在官方共享 ProtoChunk 的两种调度顺序和
 `isolated` 固定先后合并下都是 0 differing，但这是**有意的差别**；地物 / 结构 / 生成期
-光照越来越多后仍要定期核对。`light` 阶段的输入已改成 FEATURES 后视图，
-`light-pipeline` 逐格对拍 0 不一致（见「生成期光照」）。
+光照越来越多后仍要定期核对。`light` 阶段默认用局部 FEATURES 后视图；
+对拍区分输入裁剪、引擎结果与实际交付光值（见下节）。
 
 ### 生成期光照的输入（第 0 期第 2 项）
 
@@ -673,22 +673,20 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 `INITIALIZE_LIGHT`，每格的 `INITIALIZE_LIGHT` 又排在 `FEATURES` 之后；光引擎经
 `LightChunkGetter` 读到的是中心 3×3 跑完 FEATURES 后的方块，包括邻居中心溢进来的写。
 `mc_bamboo_game::worldgen_light::generate_light_stage` 把流水线存的不可变 CARVERS
-快照拼成 3×3，每格仍折进全部 9 个来源中心的地物写。光照只读方块，所以直接借用
-来源增量，按完工组装的优先级逆序覆盖，不复制标记和实体；邻接 LIGHT 任务按地形快照
-身份共享这些完整方块层，再交给 `generate_light_from_layers`。两格外来源溢进邻居的
-方块也参与光照；`isLightOn=true` 交付后不依赖运行时补算。缓存不会缩小 FEATURES
-依赖或改变交付内容，详见 `performance-optimizations.md` §31。该精确路径默认开启、
-没有 `light-local` 放宽开关；几何范围仍是 13×13 地物中心 / 15×15 地形，省的是
-重复物化。三轮交替配对实测（2026-11-28）进程 CPU 1／4／8 线程分别
-−11.95%／−9.49%／−11.56%，池 CPU −12.55%／−9.96%／−10.84%，
-`feature_run_calls` 降约 74%；见 `performance-optimizations.md` §31。
+快照拼成 3×3，仅折来源中心也在该 3×3 内的地物写。光照只读方块，因此每个作业只查询
+9 个地物中心，并直接借用写增量，按完工组装的优先级逆序覆盖。邻接 LIGHT 作业的生成参数、
+坐标、地形快照和非空来源掩码都相同就共享已物化的层，再交给原来的 `generate_light_from_layers`。
+交付 9×9 时所需地物中心／地形从 13×13／15×15 缩为 11×11／13×13。目标区块本身仍
+折进全部来源；两格外来源溢进邻居的写只在这次光照输入中省略，可能改变目标边缘的光值。
+交付方块和结构不变，`isLightOn=true`；玩家放拆方块可触发局部重算。此路径为唯一默认，
+完整视图仅用于审计；见 `performance-optimizations.md` §33。
 
 `light-pipeline` 是新增的整块对拍：`ChunkgenOracle.java --light-pipeline` 在 JVM 里让
 5×5 个来源中心各自在干净 3×3 上跑官方 FEATURES，按游戏固定先后反向合并成中心 3×3，
 再用官方 `LevelLightEngine` 跑 `initializeLight` + `light`，输出方块状态 ID 和中心柱逐格
-天空光 / 方块光；Bamboo 侧逐格比官方 3×3 方块、自己的光引擎、游戏 LIGHT 阶段三组。
-默认 6 个无结构场景 + 3 个带结构场景 0 不一致，`--break-carvers` 把游戏输入退回
-CARVERS 时报 5147 处不一致（改坏确认）。`gen-light` 只覆盖光引擎，不覆盖流水线选的方块。
+天空光 / 方块光；Bamboo 侧逐格比较完整 3×3 方块、同输入的光引擎、游戏 LIGHT 阶段，
+并单列实际 LIGHT 输入裁剪改变的方块数。如果交付光值不同，报告逐格坐标、官方值、
+局部值和旧完整输入值。`--break-carvers` 可把游戏输入退回 CARVERS 作负对照。
 
 ### 超平坦的结构、地物与湖
 
@@ -1108,11 +1106,9 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 * 生成期光照：`initialize_light` / `light` 的真实计算**已做完并接进游戏**：
   `mc_bamboo_world::light::generate::generate_light_from_layers` 在 `light` 阶段算好
   天空光 / 方块光，完工装进交付盒子并标 `isLightOn=true`，不再等运行时光照引擎补算；
-  `gen-light` 对拍逐格 0 不一致。输入也已对齐：`generate_light_stage_with_input`
-  按完工组装的来源优先级，把全部 9 个来源中心的 FEATURES 写折进 3×3，邻接任务
-  共享物化后的层，再交给光引擎；正式路径默认开启、没有放宽开关，几何范围不变。
-  `light-pipeline` 整块对拍（带结构 / 不带结构）逐格证明流水线挑的方块与官方
-  LIGHT 一致，`--break-carvers` 改坏确认会把输入退回 CARVERS 并报 5147 处差异。
+  `gen-light` 对拍验证引擎。正式路径只用 3×3 内来源中心的 FEATURES 写，同输入共享方块
+  层，无配置开关；极少数外圈越界写可以影响区块边缘亮度。`light-pipeline` 整块对拍
+  区分已知输入裁剪与实际光值差异（见上及 `performance-optimizations.md` §33）。
 * 生成期刷怪已接入：官方 `ChunkStatusTasks.generateSpawn` →
   `ChunkGenerator.spawnOriginalMobs` → `NaturalSpawner.spawnMobsForChunkGeneration`
   用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 在世界线程

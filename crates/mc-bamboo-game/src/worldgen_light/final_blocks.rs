@@ -1,6 +1,6 @@
-//! 共享生成期光照使用的完整 FEATURES 后方块层。
+//! 共享生成期光照使用的局部 FEATURES 后方块层。
 //!
-//! Share the complete post-FEATURES block layers used by generation light.
+//! Share the local post-FEATURES block layers used by generation light.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -10,12 +10,12 @@ use std::{
 use crate::{
     world_options::WorldGenConfig,
     worldgen::GeneratedChunk,
-    worldgen_features::{FeatureCacheKey, feature_block_layers, feature_cache_key},
+    worldgen_features::{BlockDelta, FeatureCacheKey, feature_cache_key, fold_light_blocks},
 };
 
 pub(super) type Layers = Arc<Vec<Vec<u32>>>;
-type Key = (FeatureCacheKey, usize);
-type Slot = Arc<OnceLock<Result<Layers, String>>>;
+type Key = (FeatureCacheKey, usize, u16);
+type Slot = Arc<OnceLock<Layers>>;
 
 struct Entry {
     slot: Slot,
@@ -50,32 +50,27 @@ pub(super) fn get(
     x: i32,
     z: i32,
     terrain: &Arc<GeneratedChunk>,
-) -> Result<Layers, String> {
+    sources: [&[BlockDelta]; 9],
+) -> Layers {
     crate::worldgen_cache::touch();
+    // 同一格的不同视图若仅相差空来源，可共享同一份方块层。
+    // Views of the same cell share layers when they differ only by empty sources.
+    let mask = sources.iter().enumerate().fold(0, |mask, (slot, writes)| {
+        mask | (u16::from(!writes.is_empty()) << slot)
+    });
     let key = (
         feature_cache_key(config, x, z),
         Arc::as_ptr(terrain) as usize,
+        mask,
     );
-    let compute = || feature_block_layers(config, x, z, &terrain.blocks).map(Arc::new);
+    let compute = || Arc::new(fold_light_blocks(&terrain.blocks, sources));
     let Ok(mut cache) = CACHE.get_or_init(Mutex::default).lock() else {
         return compute();
     };
     let (slot, evicted) = cache.slot(&key, terrain);
     drop(cache);
     drop(evicted);
-    let result = slot.get_or_init(compute);
-    if result.is_err()
-        && let Some(cache) = CACHE.get()
-        && let Ok(mut cache) = cache.lock()
-        && cache
-            .entries
-            .get(&key)
-            .is_some_and(|entry| Arc::ptr_eq(&entry.slot, &slot))
-    {
-        cache.entries.remove(&key);
-        cache.order.retain(|other| other != &key);
-    }
-    result.clone()
+    Arc::clone(slot.get_or_init(compute))
 }
 
 impl Cache {

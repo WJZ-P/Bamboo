@@ -20,7 +20,16 @@ use std::{
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
-use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, director::TicketOp};
+use mc_bamboo_storage::{
+    anvil::{AnvilError, RegionCompression, RegionFile},
+    chunk_io::ChunkIo,
+    world_dir::WorldDir,
+};
+use mc_bamboo_world::{
+    MIN_Y, WORLD_HEIGHT,
+    director::TicketOp,
+    ticket::{FULL_CHUNK_LEVEL, TicketType},
+};
 
 use crate::{
     world::{World, WorldConfig},
@@ -186,7 +195,30 @@ fn generated_cells_with_seed(
     threads: usize,
     positions: &[ChunkPos],
 ) -> BTreeMap<ChunkPos, ChunkCells> {
-    let (_inbox, receiver) = crate::inbound::channel();
+    generated_cells_in_batches(seed, threads, &[positions])
+}
+
+fn generated_cells_in_batches(
+    seed: i64,
+    threads: usize,
+    batches: &[&[ChunkPos]],
+) -> BTreeMap<ChunkPos, ChunkCells> {
+    let (mut world, _inbox) = staged_world(seed, threads);
+    for positions in batches {
+        assert!(
+            positions.iter().all(|&pos| !world.is_chunk_loaded(pos)),
+            "each batch must request new FULL columns"
+        );
+        load_full_batch(&mut world, threads, positions);
+    }
+    collect_generated_cells(
+        &mut world,
+        batches.iter().flat_map(|batch| batch.iter().copied()),
+    )
+}
+
+fn staged_world(seed: i64, threads: usize) -> (World, crate::inbound::InboundSender) {
+    let (inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         view_distance: 3,
         world_gen: WorldGenConfig {
@@ -199,9 +231,14 @@ fn generated_cells_with_seed(
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
+    disable_random_ticks(&mut world);
+    (world, inbox)
+}
+
+fn load_full_batch(world: &mut World, threads: usize, positions: &[ChunkPos]) {
     // 在 FULL 档取生成期的逐格基准；升入 BLOCK_TICKING 会消费完工表。
     // Compare the assembled FULL output before promotion consumes its generation marks.
-    world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
+    world.load_chunks_unpaced(positions, FULL_CHUNK_LEVEL);
 
     let mut last_progress = Instant::now();
     let deadline = last_progress + PIPELINE_WATCHDOG;
@@ -228,8 +265,16 @@ fn generated_cells_with_seed(
         quiet = 0;
         if world.master.host.compute_in_pool() > 0 {
             idle_unloaded_ticks = 0;
-            wait_for_compute_progress(&mut world, &mut last_progress, deadline, &context);
-        } else if has_pending_work(&world) {
+            wait_for_compute_progress(world, &mut last_progress, deadline, &context);
+        } else if world
+            .master
+            .host
+            .io()
+            .is_some_and(|io| io.in_flight_requests() > 0)
+        {
+            world.master.host.flush_io();
+            idle_unloaded_ticks = 0;
+        } else if has_pending_work(world) {
             last_progress = Instant::now();
             idle_unloaded_ticks = 0;
         } else {
@@ -240,10 +285,209 @@ fn generated_cells_with_seed(
             );
         }
     }
+}
 
+fn assert_same_lit_cells(want: &ChunkCells, have: &ChunkCells) {
+    assert!(want.light_on && have.light_on, "column is not lit");
+    assert!(
+        want.blocks.contains(&blocks::DEEPSLATE),
+        "missing normal terrain"
+    );
+    assert!(want.blocks == have.blocks, "blocks differ");
+    assert!(want.sky == have.sky, "sky light differs");
+    assert!(want.block == have.block, "block light differs");
+}
+
+#[test]
+fn promoted_corrupt_column_regenerates_like_a_missing_column() {
+    let seed = 42;
+    let first = ChunkPos::new(14, 6);
+    let corrupt = ChunkPos::new(15, 6);
+    let expected = generated_cells_in_batches(seed, 0, &[&[first], &[corrupt]]);
+    for threads in [0, 4] {
+        let temp = super::tests::D6TempDir::new("corrupt-staged");
+        let dir = WorldDir::new(&temp.0);
+        dir.create_layout().unwrap();
+        let mut file = RegionFile::open(
+            dir.region_dir().join("r.0.0.mca"),
+            dir.region_dir(),
+            RegionCompression::Zlib,
+        )
+        .unwrap();
+        file.write(corrupt, Some(b"invalid NBT"), 1).unwrap();
+        file.sync().unwrap();
+        drop(file);
+        let (mut world, _inbox) = staged_world(seed, threads);
+        let io = ChunkIo::open(&dir).unwrap();
+        assert!(io.has_chunk(corrupt));
+        world.master.host.set_io(io);
+        load_full_batch(&mut world, threads, &[first]);
+        assert!(!world.is_chunk_loaded(corrupt));
+        load_full_batch(&mut world, threads, &[corrupt]);
+        let actual = collect_generated_cells(&mut world, [corrupt].into_iter());
+        assert_same_lit_cells(&expected[&corrupt], &actual[&corrupt]);
+        println!("corrupt promoted column regenerated (workers={threads})");
+    }
+}
+
+#[test]
+fn promoted_missing_external_column_regenerates_like_a_missing_column() {
+    compare_failed_external_column(false);
+}
+
+#[test]
+fn promoted_corrupt_external_stream_regenerates_like_a_missing_column() {
+    compare_failed_external_column(true);
+}
+
+fn compare_failed_external_column(corrupt_stream: bool) {
+    let seed = 42;
+    let threads = 4;
+    let first = ChunkPos::new(14, 6);
+    let missing = ChunkPos::new(15, 6);
+    let expected = generated_cells_with_seed(seed, 0, &[first, missing]);
+    let temp = super::tests::D6TempDir::new("missing-external-staged");
+    let dir = WorldDir::new(&temp.0);
+    dir.create_layout().unwrap();
+    let region = dir.region_dir();
+    let compression = if corrupt_stream {
+        RegionCompression::Zlib
+    } else {
+        RegionCompression::None
+    };
+    let mut file = RegionFile::open(region.join("r.0.0.mca"), &region, compression).unwrap();
+    let payload = if corrupt_stream {
+        let mut state = 42_u64;
+        (0..1 << 20)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    } else {
+        vec![0; 1 << 20]
+    };
+    file.write(missing, Some(&payload), 1).unwrap();
+    file.sync().unwrap();
+    let external = region.join("c.15.6.mcc");
+    assert!(external.is_file());
+    if corrupt_stream {
+        std::fs::write(&external, b"not a zlib stream").unwrap();
+        assert!(matches!(
+            file.read(missing, 2 << 20),
+            Err(AnvilError::Io(_))
+        ));
+    } else {
+        std::fs::rename(&external, region.join("fixture.mcc.offline")).unwrap();
+        assert!(matches!(
+            file.read(missing, 2 << 20),
+            Err(AnvilError::MissingExternal)
+        ));
+    }
+    assert!(file.has_chunk(missing));
+    drop(file);
+
+    let (mut world, _inbox) = staged_world(seed, threads);
+    let io = ChunkIo::open(&dir).unwrap();
+    assert!(io.has_chunk(missing), "the scan must see the Anvil stub");
+    world.master.host.set_io(io);
+    load_full_batch(&mut world, threads, &[first]);
+    assert!(!world.is_chunk_loaded(missing));
+    load_full_batch(&mut world, threads, &[missing]);
+    let actual = collect_generated_cells(&mut world, [missing].into_iter());
+    assert_same_lit_cells(&expected[&missing], &actual[&missing]);
+    println!(
+        "external column regenerated, corrupt_stream={corrupt_stream}, cells_per_layer={}",
+        WORLD_HEIGHT as usize * 256
+    );
+}
+
+fn unload_and_save_full(world: &mut World, pos: ChunkPos) {
+    world.apply_ticket(TicketOp::Remove {
+        ty: TicketType::PlayerLoading,
+        pos,
+        level: FULL_CHUNK_LEVEL,
+    });
+    let deadline = Instant::now() + PIPELINE_WATCHDOG;
+    while world.is_chunk_loaded(pos)
+        || has_pending_work(world)
+        || !world.master.host.save_queue.is_empty()
+        || world
+            .master
+            .host
+            .io()
+            .is_some_and(|io| io.in_flight_requests() > 0 || !io.has_chunk(pos))
+    {
+        let _ = world.tick();
+        world.master.host.flush_io();
+        check_pipeline_deadline(deadline, "waiting for generated chunk reclaim and save");
+    }
+    world.master.host.flush_io();
+}
+
+#[test]
+fn generated_full_light_survives_unload_and_disk_reopen() {
+    let seed = 42;
+    let threads = 4;
+    let pos = ChunkPos::new(17, 7);
+    let temp = super::tests::D6TempDir::new("staged-reopen");
+    let dir = WorldDir::new(&temp.0);
+    dir.create_layout().unwrap();
+    let (mut world, mut inbox) = staged_world(seed, threads);
+    world.master.host.set_io(ChunkIo::open(&dir).unwrap());
+    world.master.host.set_reclaim_delay(0);
+    load_full_batch(&mut world, threads, &[pos]);
+    let original = collect_generated_cells(&mut world, [pos].into_iter());
+    let cell = original[&pos]
+        .blocks
+        .iter()
+        .position(|&state| state == blocks::DEEPSLATE)
+        .expect("generated deepslate");
+    let marker = BlockPos::new(
+        pos.x * 16 + (cell % 256 / 16) as i32,
+        MIN_Y + (cell / 256) as i32,
+        pos.z * 16 + (cell % 16) as i32,
+    );
+    let markers = [blocks::OBSIDIAN, blocks::COBBLESTONE, blocks::OBSIDIAN];
+    for (cycle, state) in markers.into_iter().enumerate() {
+        let region = &mut world.islands.region;
+        assert!(region.chunks.set_block(marker, state));
+        region.touch(marker);
+        region.chunks.finish_light_updates();
+        let before = collect_generated_cells(&mut world, [pos].into_iter());
+        assert_eq!(before[&pos].blocks[cell], state);
+        assert!(original[&pos].sky == before[&pos].sky);
+        assert!(original[&pos].block == before[&pos].block);
+        unload_and_save_full(&mut world, pos);
+        drop(world);
+        drop(inbox);
+        let (mut reopened, reopened_inbox) = staged_world(seed, threads);
+        let io = ChunkIo::open(&dir).unwrap();
+        assert!(io.has_chunk(pos), "reopen must find the saved column");
+        reopened.master.host.set_io(io);
+        reopened.master.host.set_reclaim_delay(0);
+        load_full_batch(&mut reopened, threads, &[pos]);
+        let after = collect_generated_cells(&mut reopened, [pos].into_iter());
+        assert_same_lit_cells(&before[&pos], &after[&pos]);
+        println!(
+            "cycle={}, marker={state}, cells_per_layer={}",
+            cycle + 1,
+            WORLD_HEIGHT as usize * 256
+        );
+        world = reopened;
+        inbox = reopened_inbox;
+    }
+}
+
+fn collect_generated_cells(
+    world: &mut World,
+    positions: impl Iterator<Item = ChunkPos>,
+) -> BTreeMap<ChunkPos, ChunkCells> {
     let capacity = WORLD_HEIGHT as usize * 256;
     let mut out = BTreeMap::new();
-    for &pos in positions {
+    for pos in positions {
         let light_on = world
             .islands
             .region
@@ -280,6 +524,45 @@ fn generated_cells_with_seed(
         out.insert(pos, cells);
     }
     out
+}
+
+#[test]
+fn staged_light_matches_one_shot_when_full_columns_arrive_in_strips() {
+    let strips: Vec<Vec<_>> = (14..=17)
+        .map(|x| (6..=8).map(|z| ChunkPos::new(x, z)).collect())
+        .collect();
+    let positions: Vec<_> = strips.iter().flatten().copied().collect();
+    let batches: Vec<_> = strips.iter().map(Vec::as_slice).collect();
+    let incremental = generated_cells_in_batches(42, 4, &batches);
+    let one_shot = generated_cells_with_seed(42, 4, &positions);
+    for pos in &positions {
+        let a = &one_shot[pos];
+        let b = &incremental[pos];
+        assert!(a.light_on && b.light_on, "{pos:?}: unlit column");
+        assert!(a.blocks.contains(&blocks::DEEPSLATE), "{pos:?}: no terrain");
+        if let Some((cell, (&a, &b))) = a
+            .blocks
+            .iter()
+            .zip(&b.blocks)
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+        {
+            let at = BlockPos::new(
+                pos.x * 16 + (cell % 256 / 16) as i32,
+                MIN_Y + (cell / 256) as i32,
+                pos.z * 16 + (cell % 16) as i32,
+            );
+            panic!("{at:?}: one-shot block {a}, incremental block {b}");
+        }
+        assert!(a.sky == b.sky, "{pos:?}: sky light differs");
+        assert!(a.block == b.block, "{pos:?}: block light differs");
+    }
+    println!(
+        "batches={}, chunks={}, cells_per_layer={}",
+        batches.len(),
+        positions.len(),
+        positions.len() * WORLD_HEIGHT as usize * 256
+    );
 }
 
 /// 验收：1、2、4、8 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、

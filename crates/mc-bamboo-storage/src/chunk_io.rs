@@ -1186,6 +1186,99 @@ mod tests {
     }
 
     #[test]
+    fn batched_overwrites_keep_latest_inline_and_external_chunks() {
+        let tmp = TempDir::new("mixed-overwrites");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let positions = [
+            ChunkPos::new(2, 3),
+            ChunkPos::new(4, 3),
+            ChunkPos::new(33, 4),
+            ChunkPos::new(-1, 13),
+        ];
+        let mut state = 42_u64;
+        let large: Vec<u8> = (0..1 << 20)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let mut expected = Vec::new();
+        for wave in 0..3 {
+            let (ready, release) = io.pause_for_test();
+            ready.recv_timeout(Duration::from_secs(30)).unwrap();
+            expected.clear();
+            for revision in 1..=5 {
+                for (slot, &pos) in positions.iter().enumerate() {
+                    let external = (wave + slot).is_multiple_of(2);
+                    let mut bytes = vec![wave as u8, slot as u8, revision];
+                    if revision == 5 {
+                        if external {
+                            bytes.extend_from_slice(&large);
+                        }
+                        expected.push(bytes.clone());
+                    }
+                    io.submit_write(
+                        pos,
+                        wave as u64 * 5 + u64::from(revision),
+                        Some(bytes),
+                        None,
+                    );
+                }
+            }
+            let barrier = io.submit_barrier();
+            for (slot, &pos) in positions.iter().enumerate() {
+                io.submit_read(pos, slot as u64, wave as u64);
+            }
+            release.send(()).unwrap();
+            io.flush().unwrap();
+            let replies = collect(&io);
+            assert!(replies.contains(&Reply::Flushed {
+                seq: barrier,
+                ok: true
+            }));
+            assert!(
+                !replies
+                    .iter()
+                    .any(|reply| matches!(reply, Reply::WriteFailed { .. }))
+            );
+            for (slot, &pos) in positions.iter().enumerate() {
+                assert!(replies.contains(&Reply::Written {
+                    pos,
+                    seq: wave as u64 * 5 + 5,
+                    present: true,
+                }));
+                let read = replies
+                    .iter()
+                    .find(|reply| matches!(reply, Reply::Read { pos: at, .. } if *at == pos));
+                assert!(matches!(
+                    read, Some(Reply::Read { chunk: Some(bytes), error: None, .. }) if bytes == &expected[slot]
+                ));
+                let external = dir.region_dir().join(format!("c.{}.{}.mcc", pos.x, pos.z));
+                assert_eq!(external.exists(), (wave + slot).is_multiple_of(2));
+            }
+        }
+        io.close();
+        let reopened = ChunkIo::open(&dir).unwrap();
+        for (slot, &pos) in positions.iter().enumerate() {
+            assert!(reopened.has_chunk(pos));
+            reopened.submit_read(pos, slot as u64, 3);
+        }
+        reopened.flush().unwrap();
+        let replies = collect(&reopened);
+        assert_eq!(replies.len(), positions.len());
+        for (slot, reply) in replies.iter().enumerate() {
+            assert!(matches!(
+                reply, Reply::Read { pos, chunk: Some(bytes), error: None, .. }
+                    if *pos == positions[slot] && bytes == &expected[slot]
+            ));
+        }
+    }
+
+    #[test]
     fn a_standalone_file_write_goes_through_the_io_thread() {
         let tmp = TempDir::new("filewrite");
         let dir = WorldDir::new(&tmp.0);

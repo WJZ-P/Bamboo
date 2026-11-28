@@ -2199,7 +2199,7 @@ impl DirectorHost {
                                 status,
                             }
                         }
-                        Err(error) => TaskResult::BadChunk { error },
+                        Err(error) => TaskResult::DecodeFailed { error },
                     }
                 } else {
                     TaskResult::Decoded {
@@ -2632,7 +2632,7 @@ impl DirectorHost {
                     status,
                 }
             }
-            ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
+            ChunkOutcome::Decoded(Err(error)) => TaskResult::DecodeFailed { error },
             ChunkOutcome::Generated { stage, output } => {
                 // 取消时已经在跑的生成：Director 不再认它，`Forgot` 也可能已经清过
                 // 这个位置，合并进来就再没人清。不合并；重派时纯函数给出同样结果。
@@ -2734,7 +2734,7 @@ impl DirectorHost {
                 } => {
                     let bytes = match error {
                         Some(message) => {
-                            tracing::warn!(%message, ?pos, "chunk read failed; using flat template");
+                            tracing::warn!(%message, ?pos, "chunk read failed; treating as missing");
                             None
                         }
                         None if chunk.is_none() => None,

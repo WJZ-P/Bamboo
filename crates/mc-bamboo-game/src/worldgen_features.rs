@@ -717,8 +717,9 @@ struct FeatureShard {
     inflight: HashMap<FeatureCacheKey, FeatureSlot>,
     order: std::collections::VecDeque<FeatureCacheKey>,
     bytes: usize,
-    /// 每条条目「5×5 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
-    /// Per-entry bitmap of assembled chunks in its 5×5; the entry is dropped
+    /// 每条条目「3×3 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
+    ///
+    /// Per-entry bitmap of assembled chunks in its 3×3; the entry is dropped
     /// once it is full (see `worldgen_cache`).
     finished: HashMap<FeatureCacheKey, u32>,
 }
@@ -790,11 +791,11 @@ pub(crate) fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> Fe
     )
 }
 
-/// `(cx, cz)` 的 5×5 里第 `bit` 个区块已经完工；25 个都完工就删掉这条地物结果。
+/// `(cx, cz)` 的 3×3 里第 `bit` 个区块已经完工；9 个都完工就删掉这条地物结果。
 /// 条目不在缓存里时什么都不做。
 ///
-/// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
-/// feature result once all 25 are. Missing entries are left alone. The removed
+/// Chunk `bit` of the 3×3 around `(cx, cz)` has been assembled; drop this
+/// feature result once all nine are. Missing entries are left alone. The removed
 /// result is freed outside the lock.
 pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
     let key = feature_cache_key(config, cx, cz);
@@ -806,7 +807,7 @@ pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: 
     }
     let done = shard.finished.entry(key.clone()).or_default();
     *done |= 1 << bit;
-    if *done != crate::worldgen_cache::ALL_5X5 {
+    if *done != crate::worldgen_cache::ALL_3X3 {
         return;
     }
     let removed = shard.remove_entry(&key);
@@ -1000,41 +1001,54 @@ fn cached_feature_run(
     Ok(run)
 }
 
-/// 光引擎只读最终方块，不需要复制地物标记、实体或构造赢家表。
+/// 一次 LIGHT 作业只查询目标 3×3 内的地物中心。
 ///
-/// The light engine only reads final blocks; skip copying feature marks,
-/// entities and constructing winner maps.
-pub(crate) fn feature_block_layers(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-    terrain: &[Vec<u32>],
-) -> Result<Vec<Vec<u32>>, String> {
-    fold_block_layers(cx, cz, terrain, |x, z| cached_feature_run(config, x, z))
+/// One LIGHT job looks up feature runs only for centers inside its 3×3.
+pub(crate) struct LightFeatureRuns([Arc<FeatureRun>; 9]);
+
+impl LightFeatureRuns {
+    pub(crate) fn load(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<Self, String> {
+        let mut runs = std::array::from_fn(|_| None);
+        for (slot, run) in runs.iter_mut().enumerate() {
+            let x = cx + (slot as i32 % 3 - 1);
+            let z = cz + (slot as i32 / 3 - 1);
+            *run = Some(cached_feature_run(config, x, z)?);
+        }
+        Ok(Self(runs.map(Option::unwrap)))
+    }
+
+    /// 对一个视图格，用相对该格的来源下标借用交集内的写。
+    ///
+    /// For one view cell, borrow writes from the intersection, indexed by
+    /// the source slot relative to that cell.
+    pub(crate) fn sources(&self, dest: usize) -> [&[BlockDelta]; 9] {
+        std::array::from_fn(|slot| {
+            let x = dest as i32 % 3 + slot as i32 % 3 - 1;
+            let z = dest as i32 / 3 + slot as i32 / 3 - 1;
+            if (0..3).contains(&x) && (0..3).contains(&z) {
+                self.0[(z * 3 + x) as usize].deltas[8 - slot].as_slice()
+            } else {
+                &[]
+            }
+        })
+    }
 }
 
-fn fold_block_layers(
-    cx: i32,
-    cz: i32,
+/// 来源逆序、来源内正序：最高优先级的来源最后覆盖，组内最后一写仍然赢。
+///
+/// Reverse source priority, not each source's writes: the best source
+/// overwrites last, and its last write to each cell still wins.
+pub(crate) fn fold_light_blocks(
     terrain: &[Vec<u32>],
-    mut source: impl FnMut(i32, i32) -> Result<Arc<FeatureRun>, String>,
-) -> Result<Vec<Vec<u32>>, String> {
+    sources: [&[BlockDelta]; 9],
+) -> Vec<Vec<u32>> {
     let mut slots: [u8; 9] = std::array::from_fn(|slot| slot as u8);
     slots.sort_unstable_by_key(|&slot| feature_source_order(slot));
-    let mut sources = Vec::with_capacity(slots.len());
-    for slot in slots {
-        let dx = i32::from(slot % 3) - 1;
-        let dz = i32::from(slot / 3) - 1;
-        sources.push((slot, source(cx + dx, cz + dz)?));
-    }
-    // 来源逆序、来源内正序：最高优先级的来源最后覆盖，组内最后一写仍然赢。
-    // Reverse source priority, not each source's writes: the best source
-    // overwrites last, and its last write to each cell still wins.
     let mut blocks = terrain.to_vec();
-    for (slot, run) in sources.into_iter().rev() {
-        apply_block_deltas(&mut blocks, &run.deltas[8 - usize::from(slot)]);
+    for slot in slots.into_iter().rev() {
+        apply_block_deltas(&mut blocks, sources[usize::from(slot)]);
     }
-    Ok(blocks)
+    blocks
 }
 
 #[cfg(test)]
@@ -1776,12 +1790,13 @@ mod tests {
         );
     }
 
-    /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
+    /// 按依赖释放：3×3 个区块都完工，这个中心的地物结果才删；删了再要，
     /// 现算出来的和原来逐条相同。
-    /// Dependency release: a center's feature result goes only once all 5×5
+    ///
+    /// Dependency release: a center's feature result goes only once all 3×3
     /// chunks are assembled; asking again recomputes identical writes.
     #[test]
-    fn feature_run_is_released_when_its_5x5_is_assembled() {
+    fn feature_run_is_released_when_its_3x3_is_assembled() {
         let config = normal(0x0fea_7c0e);
         let (cx, cz) = (12, 6);
         let cached = |config: &WorldGenConfig| {
@@ -1790,15 +1805,16 @@ mod tests {
             shard.entries.contains_key(&key)
         };
         let first = cached_feature_run(&config, cx, cz).unwrap();
-        let positions: Vec<ChunkPos> = (-2..=2)
-            .flat_map(|dz| (-2..=2).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
+        let positions: Vec<ChunkPos> = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
             .collect();
-        for &pos in &positions[..24] {
+        crate::worldgen_cache::chunk_finished(&config, ChunkPos::new(cx + 2, cz));
+        for &pos in &positions[..8] {
             crate::worldgen_cache::chunk_finished(&config, pos);
         }
-        assert!(cached(&config), "one chunk of the 5x5 is not assembled");
-        crate::worldgen_cache::chunk_finished(&config, positions[24]);
-        assert!(!cached(&config), "the whole 5x5 is assembled");
+        assert!(cached(&config), "one chunk of the 3x3 is not assembled");
+        crate::worldgen_cache::chunk_finished(&config, positions[8]);
+        assert!(!cached(&config), "the whole 3x3 is assembled");
         let again = cached_feature_run(&config, cx, cz).unwrap();
         assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
         assert_eq!(first.deltas, again.deltas);

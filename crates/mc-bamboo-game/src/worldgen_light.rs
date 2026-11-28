@@ -7,29 +7,17 @@
 //! 溢出写进来的格子（`ChunkPyramid.<clinit>`、`ChunkStatusTasks.initializeLight`
 //! / `light`、`LevelLightEngine.propagateLightSources`）。
 //!
-//! 这里照做：把流水线存的不可变 CARVERS 快照拼成 3×3，再按完工组装的来源优先级
-//! 把完整的 9 个来源中心地物写折进每个格子。邻接光照任务共享物化后的方块层，
-//! 最后经 `generate_light_from_layers` 直接读逐层方块（不先组装
-//! 完整区块），把中心柱的天空光 + 方块光交回世界线程。树冠、萤石、灯笼、结构
-//! 光源因此都参与生成期光照；运行时不会补算，`isLightOn=true` 交付的区块会一直
-//! 带着这次算出的光。
-//!
-//! `mc_bamboo_world::light::generate::generate_light` 复用运行时那套已和官方逐格
-//! 对拍过的光引擎；`gen-light` 只证明这批方块喂进引擎后结果一致，整块光照对拍
-//! （`light-pipeline`）另证流水线挑的方块和官方一致。
+//! 这里仅折 3×3 内来源中心的地物写，避免为光照额外生成外圈。相同快照及非空来源
+//! 集合共享方块层；光引擎、交付方块和完工合并规则不变。
 //!
 //! Wire `ChunkStatus.LIGHT` into the pipeline. In vanilla's `GENERATION_PYRAMID`,
 //! `LIGHT` requires radius-1 `INITIALIZE_LIGHT` and each chunk reaches
 //! `INITIALIZE_LIGHT` after `FEATURES`, so the center and all 8 neighbors have
 //! completed their own features when light runs. The engine reads those very
 //! blocks through `LightChunkGetter`, including the cells a neighbor's features
-//! spilled into. Here the immutable CARVERS snapshots are folded with the same
-//! source priority as final assembly, and adjacent lighting tasks share the layers,
-//! so canopies, glowstone, lanterns and structure light sources all affect the
-//! baked light. `generate_light_from_layers` then reads the layers directly
-//! without assembling full chunks. `gen-light` validates the engine on a given
-//! set of blocks; `light-pipeline` validates that the pipeline picked the same
-//! blocks as vanilla.
+//! spilled into. Here we fold only sources within the 3×3 to avoid generating
+//! an outer ring for light. Identical snapshots and nonempty source sets share
+//! block layers; the light engine, delivered blocks and assembly rules are unchanged.
 
 use std::sync::Arc;
 
@@ -39,7 +27,9 @@ use mc_bamboo_world::light::generate::{GeneratedLight, generate_light_from_layer
 use crate::{
     world_options::WorldGenConfig,
     worldgen::GeneratedChunk,
-    worldgen_features::{SnapshotView, cached_generate_chunk_with_structures as terrain_cell},
+    worldgen_features::{
+        LightFeatureRuns, SnapshotView, cached_generate_chunk_with_structures as terrain_cell,
+    },
     worldgen_profile::{LIGHT_CALLS, LIGHT_NS},
 };
 
@@ -47,17 +37,17 @@ mod final_blocks;
 
 pub(crate) use final_blocks::clear as clear_final_blocks_cache;
 
-/// 整块光照对拍用的输入开关：默认（和游戏里一样）把 FEATURES 的写折进 3×3；
+/// 整块光照对拍用的输入：默认（和游戏里一样）只折 3×3 内来源的 FEATURES 写；
 /// `Carvers` 故意退回旧行为，证明比较器会抓住树冠 / 光源附近的差异。
-/// 中文注释在上、英文在下；这里是公开项，给 `mc-bamboo-vanilla` 的改坏确认用。
 ///
-/// Input switch for the whole-chunk light oracle. The default (and the game) folds
-/// FEATURES writes into the 3x3; `Carvers` deliberately reverts to the old input
+/// Input for the whole-chunk light oracle. The default (and the game) folds
+/// FEATURES writes from sources within the 3x3; `Carvers` reverts to the old input
 /// so the comparator must report canopy / emitter differences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LightInput {
-    /// FEATURES 后视图，和官方 LIGHT 阶段一致。
-    /// Post-FEATURES view, matching vanilla's LIGHT step.
+    /// 默认的局部 FEATURES 后视图。
+    ///
+    /// The default local post-FEATURES view.
     #[default]
     PostFeatures,
     /// 旧的 CARVERS 输入，只给改坏确认用。
@@ -110,23 +100,24 @@ fn resolve_shared_view(
     Ok(slots.map(Option::unwrap))
 }
 
-/// 3×3 每个格子都变成「CARVERS + 9 个来源中心的 FEATURES 写」。
-/// 官方 `LIGHT` 阶段读的是各区块跑完自己 `FEATURES` 后的 ProtoChunk，包括邻居
-/// 中心溢出进来的写；这里共享完整结果，不截掉两格外来源。
+/// 只折来源中心和写入格都在光照目标 3×3 内的地物写。
 ///
-/// Turn each 3x3 cell into CARVERS + the 9 source centers' FEATURES writes.
-/// Vanilla's `LIGHT` step reads each chunk's post-FEATURES ProtoChunk, including
-/// neighbor spill; share the complete results without cutting off radius-2 sources.
+/// Fold feature writes only when the source center and destination both lie
+/// inside the light target's 3×3.
 fn post_features_view(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
     terrain: &[Arc<GeneratedChunk>; 9],
 ) -> Result<Vec<final_blocks::Layers>, String> {
-    view_positions(cx, cz)
+    let runs = LightFeatureRuns::load(config, cx, cz)?;
+    Ok(view_positions(cx, cz)
         .zip(terrain)
-        .map(|(pos, cell)| final_blocks::get(config, pos.x, pos.z, cell))
-        .collect()
+        .enumerate()
+        .map(|(slot, (pos, cell))| {
+            final_blocks::get(config, pos.x, pos.z, cell, runs.sources(slot))
+        })
+        .collect())
 }
 
 fn view_positions(cx: i32, cz: i32) -> impl Iterator<Item = ChunkPos> {
@@ -199,6 +190,28 @@ pub fn post_features_blocks(
         .collect())
 }
 
+/// 对拍专用：按完工规则折入每个视图格的全部来源，包括光照目标外圈。
+///
+/// Audit only: apply every source to each view cell using delivery's merge
+/// rules, including source centers outside the light target's 3×3.
+#[cfg(any(test, feature = "oracle-samples"))]
+pub fn full_post_features_blocks(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<Vec<Vec<Vec<u32>>>, String> {
+    let view = resolve_shared_view(config, cx, cz, None, &[])?;
+    view_positions(cx, cz)
+        .zip(view)
+        .map(|(pos, cell)| {
+            let mut chunk = (*cell).clone();
+            let writes = crate::worldgen_features::feature_writes_into(config, pos.x, pos.z)?;
+            crate::worldgen_features::merge_feature_writes(&mut chunk, writes);
+            Ok(chunk.blocks)
+        })
+        .collect()
+}
+
 /// 游戏流水线入口：恒用 FEATURES 后视图。
 /// Game pipeline entry: always use the post-FEATURES view.
 pub(crate) fn generate_light_stage(
@@ -213,6 +226,9 @@ pub(crate) fn generate_light_stage(
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_core::{BlockPos, LightLayer};
+    use mc_bamboo_world::light::{LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION};
+
     use super::*;
     use crate::{
         region::chunk_content,
@@ -226,40 +242,35 @@ mod tests {
     fn light_stage_matches_full_fold() {
         let mut original_mobs = 0;
         let mut chunks = 0;
+        let mut all_raw_diffs = 0;
         for (seed, x, z, side) in [(2026, 0, 0, 5), (42, -3, 5, 2), (7, 10, -8, 2)] {
             let config = WorldGenConfig {
                 seed,
                 level_type: LevelType::Normal,
                 ..WorldGenConfig::default()
             };
+            let mut sky_diffs = 0;
+            let mut block_diffs = 0;
+            let mut raw_diffs = 0;
             for dz in 0..side {
                 for dx in 0..side {
                     let (x, z) = (x + dx, z + dz);
                     let terrain = resolve_shared_view(&config, x, z, None, &[]).unwrap();
-                    let baseline: Vec<_> = view_positions(x, z)
-                        .zip(&terrain)
-                        .map(|(pos, cell)| {
-                            let mut chunk = (**cell).clone();
-                            let writes = feature_writes_into(&config, pos.x, pos.z).unwrap();
-                            merge_feature_writes(&mut chunk, writes);
-                            (pos, chunk.blocks)
-                        })
-                        .collect();
+                    let baseline = full_post_features_blocks(&config, x, z).unwrap();
                     let shared = post_features_view(&config, x, z, &terrain).unwrap();
-                    for ((pos, old), new) in baseline.iter().zip(&shared) {
-                        assert!(old == &**new, "seed={seed}, column={pos:?}");
-                    }
-                    let columns: Vec<_> = baseline
-                        .iter()
-                        .map(|(pos, layers)| (*pos, layers.as_slice()))
+                    assert!(baseline[4] == *shared[4], "center blocks: {seed} {x},{z}");
+                    let columns: Vec<_> = view_positions(x, z)
+                        .zip(baseline.iter().map(Vec::as_slice))
                         .collect();
                     let old = generate_light_from_layers(ChunkPos::new(x, z), &columns).unwrap();
                     let new = generate_light_stage(&config, x, z, None, &[]).unwrap();
-                    assert!(old.sky == new.sky, "sky layer encoding: {seed} {x},{z}");
-                    assert!(
-                        old.block == new.block,
-                        "block layer encoding: {seed} {x},{z}"
-                    );
+                    raw_diffs += old
+                        .sky
+                        .iter()
+                        .chain(&old.block)
+                        .zip(new.sky.iter().chain(&new.block))
+                        .filter(|(a, b)| a != b)
+                        .count();
                     let pos = ChunkPos::new(x, z);
                     let mut assembled = (*terrain[4]).clone();
                     let writes = feature_writes_into(&config, x, z).unwrap();
@@ -270,20 +281,53 @@ mod tests {
                         let before = column.parts().entities.rows().len();
                         spawn_original_mobs(&config, pos, &mut column, true);
                         let added = column.parts().entities.rows().len() - before;
-                        (chunk_content::encode(&column, pos).unwrap(), added)
+                        (column, added)
                     };
-                    let (old, added) = deliver(old);
-                    let (new, new_added) = deliver(new);
-                    assert!(old == new, "chunk or entity NBT: {seed} {x},{z}");
+                    let (mut old_column, added) = deliver(old);
+                    let (new_column, new_added) = deliver(new.clone());
+                    for (layer, diffs) in [
+                        (LightLayer::Sky, &mut sky_diffs),
+                        (LightLayer::Block, &mut block_diffs),
+                    ] {
+                        let min_y = MIN_LIGHT_SECTION * 16;
+                        for y in min_y..min_y + LIGHT_SECTION_COUNT as i32 * 16 {
+                            for dx in 0..16 {
+                                for dz in 0..16 {
+                                    let at = BlockPos::new(x * 16 + dx, y, z * 16 + dz);
+                                    let a = old_column.column().light_value(layer, at);
+                                    let b = new_column.column().light_value(layer, at);
+                                    if a != b {
+                                        *diffs += 1;
+                                        println!(
+                                            "seed={seed} {layer:?} at {at:?}: exact={a} local={b}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    old_column.set_generated_light(new);
+                    let old_nbt = chunk_content::encode(&old_column, pos).unwrap();
+                    let new_nbt = chunk_content::encode(&new_column, pos).unwrap();
+                    assert!(
+                        old_nbt == new_nbt,
+                        "non-light chunk or entity NBT: {seed} {x},{z}"
+                    );
                     assert_eq!(added, new_added);
                     original_mobs += added;
                     chunks += 1;
                 }
             }
+            println!(
+                "seed={seed} origin=({x},{z}) chunks={} sky_cells={sky_diffs} block_cells={block_diffs} raw_layer_diffs={raw_diffs}",
+                side * side
+            );
+            all_raw_diffs += raw_diffs;
+            assert_eq!((sky_diffs, block_diffs), (0, 0), "fixed audit sample");
         }
         assert!(original_mobs > 0, "sample must include original mob spawns");
         println!(
-            "seeds=3 origins=3 chunks={chunks} sky_cells=0 block_cells=0 raw_layer_diffs=0 nbt_diffs=0 original_mobs={original_mobs}"
+            "seeds=3 origins=3 chunks={chunks} sky_cells=0 block_cells=0 raw_layer_diffs={all_raw_diffs} non_light_nbt_diffs=0 original_mobs={original_mobs}"
         );
     }
 
@@ -294,8 +338,8 @@ mod tests {
         let mut changed = (*original).clone();
         let top_layer = changed.blocks.last_mut().unwrap();
         top_layer[0] = mc_bamboo_data::blocks::STONE;
-        let original_layers = final_blocks::get(&config, 0, 0, &original).unwrap();
-        let changed_layers = final_blocks::get(&config, 0, 0, &Arc::new(changed)).unwrap();
+        let original_layers = final_blocks::get(&config, 0, 0, &original, [&[]; 9]);
+        let changed_layers = final_blocks::get(&config, 0, 0, &Arc::new(changed), [&[]; 9]);
         assert_eq!(
             original_layers.last().unwrap()[0],
             mc_bamboo_data::blocks::AIR
@@ -304,6 +348,19 @@ mod tests {
             changed_layers.last().unwrap()[0],
             mc_bamboo_data::blocks::STONE
         );
+    }
+
+    #[test]
+    fn light_layer_cache_does_not_alias_distinct_source_masks() {
+        let config = WorldGenConfig::flat_template();
+        let terrain = terrain_cell(&config, 41, 12).unwrap();
+        let omitted = final_blocks::get(&config, 41, 12, &terrain, [&[]; 9]);
+        let y = mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1;
+        let delta = [(41 * 16, y, 12 * 16, mc_bamboo_data::blocks::STONE)];
+        let mut sources: [&[_]; 9] = [&[]; 9];
+        sources[4] = &delta;
+        let included = final_blocks::get(&config, 41, 12, &terrain, sources);
+        assert_ne!(*omitted, *included);
     }
 
     /// 同一输入连跑两遍光照逐段相同（光引擎纯函数，随机源不参与）。
