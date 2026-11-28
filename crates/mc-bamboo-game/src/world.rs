@@ -4137,6 +4137,9 @@ mod island_partition_tests;
 #[cfg(test)]
 #[path = "world/tests/island_pool_tests.rs"]
 mod island_pool_tests;
+#[cfg(test)]
+#[path = "world/island_review_tests.rs"]
+mod island_review_tests;
 #[path = "world/island_runtime.rs"]
 mod island_runtime;
 #[cfg(test)]
